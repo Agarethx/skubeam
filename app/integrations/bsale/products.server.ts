@@ -2,6 +2,14 @@ import { supabaseAdmin } from "../../db.server";
 import { get, paginate, resolveToken } from "./client.server";
 import { refreshSkuAnalytics } from "../../models/sync.server";
 
+// ── Admin client type (mirrors authenticate.admin return) ─────────────────────
+type AdminClient = {
+  graphql: (
+    query: string,
+    options?: { variables?: Record<string, unknown> },
+  ) => Promise<Response>;
+};
+
 // ── Bsale types ───────────────────────────────────────────────────────────────
 
 interface BsaleCostItem {
@@ -140,4 +148,114 @@ export async function syncBsaleToSkuBeam(
   console.log(`[bsale-sync] Done. synced=${synced} errors=${errors}`);
   await refreshSkuAnalytics();
   return { synced, errors };
+}
+
+// ── Diff: Bsale (Supabase) ↔ Shopify ─────────────────────────────────────────
+
+export type DiffCategory = "new" | "changed" | "synced";
+
+export interface DiffItem {
+  supabase_id:         string;
+  sku_code:            string;
+  title_bsale:         string | null;
+  cost_price:          number | null;
+  title_shopify:       string | null;
+  price_shopify:       string | null;
+  shopify_variant_gid: string | null;
+  shopify_product_gid: string | null;
+  category:            DiffCategory;
+}
+
+interface ShopifyVariantNode {
+  id:    string;
+  sku:   string;
+  price: string;
+  product: { id: string; title: string };
+}
+
+async function fetchAllShopifyVariants(admin: AdminClient): Promise<ShopifyVariantNode[]> {
+  const all: ShopifyVariantNode[] = [];
+  let cursor: string | null = null;
+
+  while (true) {
+    const res  = await admin.graphql(
+      `#graphql
+      query AllVariants($cursor: String) {
+        productVariants(first: 250, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          edges { node { id sku price product { id title } } }
+        }
+      }`,
+      { variables: { cursor } },
+    );
+    const json = await res.json() as {
+      data?: {
+        productVariants?: {
+          pageInfo: { hasNextPage: boolean; endCursor: string };
+          edges: Array<{ node: ShopifyVariantNode }>;
+        };
+      };
+    };
+    const conn  = json.data?.productVariants;
+    const edges = conn?.edges ?? [];
+    all.push(...edges.map((e) => e.node));
+    if (!conn?.pageInfo.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor;
+  }
+
+  return all;
+}
+
+export async function getBsaleShopifyDiff(
+  shopId: string,
+  admin:  AdminClient,
+): Promise<{ items: DiffItem[]; counts: Record<DiffCategory, number> }> {
+  const [{ data: supabaseSkus }, shopifyVariants] = await Promise.all([
+    supabaseAdmin
+      .from("skus")
+      .select("id, sku_code, title, cost_price")
+      .eq("shop_id", shopId)
+      .eq("status", "active"),
+    fetchAllShopifyVariants(admin),
+  ]);
+
+  // Map shopify variants by sku_code (non-empty)
+  const shopifyMap = new Map<string, ShopifyVariantNode>();
+  for (const v of shopifyVariants) {
+    if (v.sku?.trim()) shopifyMap.set(v.sku.trim(), v);
+  }
+
+  const counts: Record<DiffCategory, number> = { new: 0, changed: 0, synced: 0 };
+
+  const items: DiffItem[] = (supabaseSkus ?? []).map((row) => {
+    const shopifyVariant = shopifyMap.get(row.sku_code);
+
+    let category: DiffCategory;
+    if (!shopifyVariant) {
+      category = "new";
+    } else if (
+      (row.title ?? "").trim().toLowerCase() !==
+      (shopifyVariant.product.title ?? "").trim().toLowerCase()
+    ) {
+      category = "changed";
+    } else {
+      category = "synced";
+    }
+
+    counts[category]++;
+
+    return {
+      supabase_id:         row.id,
+      sku_code:            row.sku_code,
+      title_bsale:         row.title,
+      cost_price:          row.cost_price,
+      title_shopify:       shopifyVariant?.product.title ?? null,
+      price_shopify:       shopifyVariant?.price ?? null,
+      shopify_variant_gid: shopifyVariant?.id ?? null,
+      shopify_product_gid: shopifyVariant?.product.id ?? null,
+      category,
+    };
+  });
+
+  return { items, counts };
 }
