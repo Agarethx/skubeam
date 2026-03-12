@@ -224,6 +224,8 @@ export type Database = {
       }
       shops: {
         Row: {
+          bsale_last_sync: string | null
+          bsale_token: string | null
           id: string
           installed_at: string | null
           is_active: boolean | null
@@ -234,6 +236,8 @@ export type Database = {
           uninstalled_at: string | null
         }
         Insert: {
+          bsale_last_sync?: string | null
+          bsale_token?: string | null
           id?: string
           installed_at?: string | null
           is_active?: boolean | null
@@ -244,6 +248,8 @@ export type Database = {
           uninstalled_at?: string | null
         }
         Update: {
+          bsale_last_sync?: string | null
+          bsale_token?: string | null
           id?: string
           installed_at?: string | null
           is_active?: boolean | null
