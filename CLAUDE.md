@@ -14,46 +14,54 @@ Stack: **React Router v7 (Remix) + Supabase + Shopify App Bridge v4 + Polaris we
 skubeam/
 ├── app/
 │   ├── routes/
-│   │   ├── app.tsx                           # Layout + AppProvider + s-app-nav
-│   │   ├── app._index.tsx                    # Dashboard /app
-│   │   ├── app.skus._index.tsx               # Lista de SKUs con filtros y sync
-│   │   ├── app.skus.$id.tsx                  # Detalle de SKU: edición, barcode, health score
-│   │   ├── auth.$.tsx                        # OAuth — NO TOCAR
-│   │   ├── auth.login/                       # Login flow — NO TOCAR
-│   │   ├── api.sync.tsx                      # GET polling + POST trigger de sync
-│   │   ├── webhooks.app.uninstalled.tsx      # APP_UNINSTALLED
-│   │   ├── webhooks.app.scopes_update.tsx    # Scopes update
-│   │   ├── webhooks.bulk_operations.finish.tsx # BULK_OPERATIONS_FINISH
-│   │   ├── webhooks.products.update.tsx      # PRODUCTS_UPDATE → upsertSkuFromShopify
-│   │   └── webhooks.gdpr.tsx                 # CUSTOMERS_DATA_REQUEST/REDACT, SHOP_REDACT
+│   │   ├── app.tsx                              # Layout + AppProvider + s-app-nav
+│   │   ├── app._index.tsx                       # Dashboard /app
+│   │   ├── app.skus._index.tsx                  # Lista de SKUs con filtros y sync
+│   │   ├── app.skus.$id.tsx                     # Detalle de SKU: edición, barcode, health score
+│   │   ├── app.forecast.tsx                     # Forecast & Replenishment
+│   │   ├── app.analytics._index.tsx             # Analytics: KPIs + ABC + Velocity chart
+│   │   ├── auth.$.tsx                           # OAuth — NO TOCAR
+│   │   ├── auth.login/                          # Login flow — NO TOCAR
+│   │   ├── api.sync.tsx                         # GET polling + POST trigger de sync (products/orders)
+│   │   ├── api.sync.status.tsx                  # GET /api/sync/status?jobId= (sin auth, para polling)
+│   │   ├── webhooks.app.uninstalled.tsx         # APP_UNINSTALLED
+│   │   ├── webhooks.app.scopes_update.tsx       # Scopes update
+│   │   ├── webhooks.bulk_operations.finish.tsx  # BULK_OPERATIONS_FINISH
+│   │   ├── webhooks.products.update.tsx         # PRODUCTS_UPDATE → upsertSkuFromShopify
+│   │   └── webhooks.gdpr.tsx                    # CUSTOMERS_DATA_REQUEST/REDACT, SHOP_REDACT
 │   │
 │   ├── lib/
-│   │   ├── barcode.server.ts                 # generateBarcode() con @bwip-js/node
-│   │   ├── navigate.ts                       # useSkuBeamNavigate, useShopifyParams
-│   │   ├── server.ts                         # safeRedirect (preserva ?shop=&host=)
-│   │   └── supabase-session-storage.server.ts # SupabaseSessionStorage para OAuth
+│   │   ├── barcode.server.ts                    # generateBarcode() con @bwip-js/node
+│   │   ├── navigate.ts                          # useSkuBeamNavigate, useShopifyParams
+│   │   ├── server.ts                            # safeRedirect (preserva ?shop=&host=)
+│   │   └── supabase-session-storage.server.ts   # SupabaseSessionStorage para OAuth
 │   │
 │   ├── models/
-│   │   ├── shop.server.ts                    # upsertShop, getShop, checkSkuLimit
-│   │   ├── sku.server.ts                     # CRUD + upsertSkuFromShopify + health score
-│   │   └── sync.server.ts                    # startBulkSync, processBulkJsonl, refreshSkuAnalytics
+│   │   ├── shop.server.ts                       # upsertShop, getShop, checkSkuLimit
+│   │   ├── sku.server.ts                        # CRUD + upsertSkuFromShopify + health score
+│   │   ├── sync.server.ts                       # startBulkSync, startOrdersSync, processBulkJsonl,
+│   │   │                                        # processOrdersJsonl, refreshSkuAnalytics
+│   │   ├── forecast.server.ts                   # getForecastForShop, getDeadStockSkus, hasSalesData
+│   │   └── analytics.server.ts                  # getShopKpis, getAbcAnalysis, getTopSkusByVelocity
 │   │
 │   ├── types/
-│   │   └── supabase.ts                       # Generado: npx supabase gen types typescript --local
+│   │   └── supabase.ts                          # Generado: npx supabase gen types typescript --local
 │   │
-│   ├── db.server.ts                          # supabaseAdmin (service role)
-│   └── shopify.server.ts                     # shopifyApp config + webhooks + afterAuth
+│   ├── db.server.ts                             # supabaseAdmin (service role)
+│   └── shopify.server.ts                        # shopifyApp config + webhooks + afterAuth
 │
 ├── supabase/
-│   └── migrations/
-│       ├── 001_shopify_sessions.sql          # Tabla shopify_sessions + RLS
-│       ├── 003_shops.sql                     # Tabla shops con sku_limit
-│       └── 20260311120654_initial_schema.sql # skus, inventory_levels, sales_history,
-│                                             # sync_jobs, forecast_configs, gdpr_requests,
-│                                             # sku_analytics (materialized view)
+│   ├── migrations/
+│   │   ├── 001_shopify_sessions.sql             # Tabla shopify_sessions + RLS
+│   │   ├── 003_shops.sql                        # Tabla shops con sku_limit
+│   │   ├── 20260311120654_initial_schema.sql    # skus, inventory_levels, sales_history,
+│   │   │                                        # sync_jobs, forecast_configs, gdpr_requests,
+│   │   │                                        # sku_analytics (materialized view)
+│   │   └── 20260312000000_sales_history_line_item.sql  # shopify_line_item_id para idempotencia
+│   └── seed.sql                                 # Datos de prueba para forecast/analytics (10 SKUs)
 │
-├── shopify.app.toml                          # Scopes + webhooks registrados
-└── CLAUDE.md                                 # Este archivo
+├── shopify.app.toml                             # Scopes + webhooks registrados
+└── CLAUDE.md                                    # Este archivo
 ```
 
 ---
@@ -113,13 +121,33 @@ Pasar `width: undefined` a `toBuffer` lanza error — usar spread condicional:
 ...(type === "QR" ? { width: 30 } : {})
 ```
 
-### sku_analytics — vista materializada
-`sku_analytics` es una **materialized view** — no se actualiza automáticamente. Hay que llamar `refreshSkuAnalytics()` explícitamente después de cada write:
-- `processBulkJsonl()` → llama refresh al final del bulk sync
-- `syncSkuFromShopify()` → llama refresh después de sync individual
-- `upsertSkuFromShopify()` → llama refresh después de webhook update
+### sku_analytics — fuente de verdad para analytics
 
-La función SQL `refresh_sku_analytics()` usa `REFRESH MATERIALIZED VIEW CONCURRENTLY` (no bloquea lecturas) con índice único en `id`.
+`sku_analytics` es una **materialized view** y la **fuente canónica para todos los cálculos de analytics, forecast y KPIs**. Ningún módulo debe calcular métricas derivadas (stock total, sold_30d, sold_90d, last_sold_at) desde las tablas base — siempre leer desde `sku_analytics`.
+
+**Regla crítica**: la vista NO se actualiza automáticamente. `refreshSkuAnalytics()` debe llamarse explícitamente después de **cualquier operación que modifique stock o ventas**:
+
+| Operación | Dónde se llama refresh |
+|---|---|
+| Sync bulk de productos | `processBulkJsonl()` — al final |
+| Sync individual de SKU | `syncSkuFromShopify()` — al final |
+| Webhook PRODUCTS_UPDATE | `upsertSkuFromShopify()` — al final |
+| Importar órdenes | `processOrdersJsonl()` — al final |
+| Cualquier write a `inventory_levels` | Llamar `refreshSkuAnalytics()` manualmente |
+| Cualquier write a `sales_history` | Llamar `refreshSkuAnalytics()` manualmente |
+
+La función SQL usa `REFRESH MATERIALIZED VIEW CONCURRENTLY` — no bloquea lecturas gracias al índice único en `id`. Si una operación omite el refresh, `sku_analytics` queda desincronizada y todos los módulos (Forecast, Analytics, Health Score) mostrarán datos stale.
+
+Columnas disponibles en `sku_analytics`:
+```
+id, shop_id, sku_code, title, vendor, status, cost_price,
+total_stock, sold_30d, sold_90d, last_sold_at
+```
+
+### Polling de jobs sin autenticación
+Los endpoints de polling para bulk operations **no deben usar `authenticate.admin()`** porque el fetcher del cliente no puede incluir `?shop=&host=` automáticamente.
+
+Patrón: `api.sync.status.tsx` — endpoint público que recibe `?jobId=<uuid>` y consulta Supabase directamente. El UUID no adivinable es suficiente como token de acceso para datos de solo lectura.
 
 ### Scopes actuales (shopify.app.toml)
 ```toml
@@ -144,7 +172,7 @@ SHOP_REDACT             → /webhooks/gdpr
 ### Principios de multi-tenancy
 - **`shop_id` en todas las tablas** — es el dominio Shopify (`mi-tienda.myshopify.com`)
 - **RLS activo en todas las tablas** — sin excepciones
-- **Migrations en orden**: `001_` → `003_` → `20260311...`
+- **Migrations en orden**: `001_` → `003_` → `20260311...` → `20260312...`
 - **Nunca queries sin filtrar por `shop_id`**
 - **Regenerar tipos** tras cualquier cambio de schema: `npx supabase gen types typescript --local > app/types/supabase.ts`
 
@@ -154,11 +182,11 @@ shopify_sessions   → OAuth sessions (SupabaseSessionStorage)
 shops              → Un registro por merchant (plan, sku_limit, is_active)
 skus               → Variantes de Shopify sincronizadas
 inventory_levels   → Stock por location
-sales_history      → Historial para forecasting
-sync_jobs          → Tracking de bulk operations
+sales_history      → Historial de ventas (shopify_line_item_id para idempotencia)
+sync_jobs          → Tracking de bulk operations (type: full_product_sync | orders_sync)
 forecast_configs   → Config de reorder point por merchant
 gdpr_requests      → Auditoría GDPR
-sku_analytics      → Materialized view: total_stock, sold_30d, sold_90d, last_sold_at
+sku_analytics      → Materialized view: fuente de verdad para todos los cálculos
 ```
 
 ### shops.sku_limit
@@ -196,19 +224,96 @@ Pendiente del Módulo 1 (no crítico para MVP):
 - [ ] Detección de duplicados
 - [ ] Bulk archivar (selección múltiple)
 
-### 🔜 Módulo 2: Forecast & Replenishment — SIGUIENTE
-- [ ] Importar `sales_history` desde Shopify Orders API
-- [ ] Velocidad de ventas por SKU (moving average 30d / 90d)
-- [ ] Reorder point automático = (velocidad_diaria × lead_days) + safety_stock
-- [ ] Dead stock detector (sin ventas en N días con stock > 0)
-- [ ] Vista `app.forecast.tsx` con tabla de SKUs en riesgo
+### ✅ Módulo 2: Forecast & Replenishment — COMPLETADO
+- [x] Importar `sales_history` desde Shopify Orders API (bulk operations, último año)
+- [x] `shopify_line_item_id` en `sales_history` para idempotencia de importaciones
+- [x] Velocidad de ventas por SKU (sold_30d / 30 días)
+- [x] Reorder point automático = velocity × (lead_days + safety_stock_days)
+- [x] Dead stock detector (sold_90d = 0 con stock > 0)
+- [x] Vista `app.forecast.tsx` con tabla de SKUs por status (critical/low/ok/dead)
+- [x] Polling de jobs sin auth via `/api/sync/status?jobId=` + `useRevalidator`
+- [x] `supabase/seed.sql` con datos de prueba que cubren los 4 status
+
+Pendiente del Módulo 2:
 - [ ] `forecast_configs` editable por merchant (lead_days, safety_stock_days)
 - [ ] PO generator (exportar PDF con SKUs a reponer)
 
-### Módulo 3: Analytics
-- [ ] ABC analysis automática (A=top 80% ventas, B=15%, C=5%)
-- [ ] Dashboard de margen por SKU (precio − costo)
+### ✅ Módulo 3: Analytics — COMPLETADO
+- [x] `analytics.server.ts`: `getShopKpis`, `getAbcAnalysis`, `getTopSkusByVelocity`
+- [x] KPI dashboard: SKUs activos, unidades vendidas 30d, stock total, rotación, costo de ventas est., valor de inventario est.
+- [x] ABC analysis: clasificación por sold_30d con cumulative sum (A=80%, B=15%, C=5%)
+- [x] Velocity chart: top 20 SKUs por velocidad con barras inline CSS (sin dependencias de charts)
+- [x] Tabla ABC con badge A/B/C (success/caution/neutral), % individual y % acumulado con mini-barra
+
+Pendiente del Módulo 3:
+- [ ] Margen por SKU (requiere campo `price` en skus — precio de venta de Shopify)
 - [ ] Exportar reportes CSV
+
+---
+
+## Backlog V1.1: Arquitectura de Integraciones
+
+### Objetivo
+Permitir que SkuBeam se conecte con ERPs y sistemas de ventas de LATAM (Bsale, Aspel, etc.) usando una **interfaz común** por integración. Cada integración vive en `app/integrations/<nombre>/` y expone los mismos métodos, lo que permite agregar integraciones nuevas sin modificar la lógica core.
+
+### Estructura de directorios
+```
+app/integrations/
+├── types.ts                    # Interfaz común IntegrationAdapter
+├── bsale/
+│   ├── adapter.server.ts       # Implementa IntegrationAdapter con Bsale API REST
+│   ├── auth.server.ts          # OAuth / token management para Bsale
+│   └── webhooks.server.ts      # Recepción de eventos de Bsale (stock, ventas)
+└── (future: aspel/, siigo/, etc.)
+```
+
+### Interfaz común `IntegrationAdapter`
+Todos los adaptadores deben implementar esta interfaz definida en `app/integrations/types.ts`:
+
+```typescript
+export interface IntegrationAdapter {
+  /** Importar catálogo de productos desde el sistema externo → skus */
+  syncProducts(shopId: string): Promise<{ synced: number; errors: number }>;
+
+  /** Importar niveles de stock por location desde el sistema externo → inventory_levels */
+  syncStock(shopId: string): Promise<{ synced: number; errors: number }>;
+
+  /** Enviar una orden de compra generada en SkuBeam al sistema externo */
+  pushPurchaseOrder(shopId: string, order: PurchaseOrder): Promise<{ externalId: string }>;
+
+  /** Callback invocado cuando el stock cambia en el sistema externo.
+   *  La integración debe llamar refreshSkuAnalytics() al final. */
+  onStockChange(shopId: string, event: StockChangeEvent): Promise<void>;
+}
+
+export interface PurchaseOrder {
+  items: Array<{ sku_code: string; quantity: number; unit_cost: number }>;
+  supplier?: string;
+  notes?: string;
+}
+
+export interface StockChangeEvent {
+  shopify_variant_id?: number;
+  sku_code?: string;
+  location_id?: string;
+  new_quantity: number;
+  changed_at: string;
+}
+```
+
+### Primera integración target: Bsale API REST
+- **Auth**: API key por merchant (guardada en `shops.settings` JSONB)
+- **syncProducts**: `GET /v1/variant.json` → upsert en `skus`
+- **syncStock**: `GET /v1/stock.json?officeId=X` → upsert en `inventory_levels` + refresh
+- **pushPurchaseOrder**: `POST /v1/purchaseOrder.json`
+- **onStockChange**: webhook entrante de Bsale → `POST /webhooks/bsale/stock`
+
+### Reglas para integraciones
+- Credenciales siempre en `shops.settings` (JSONB), nunca hardcodeadas
+- Llamar `refreshSkuAnalytics()` al final de `syncStock` y `onStockChange`
+- Cada integración tiene su propio directorio — sin código de Bsale en el core
+- Los webhooks de integraciones siguen el mismo patrón que los webhooks de Shopify (verificación HMAC o token)
+- Agregar `integration_connections` table en migration para tracking de auth status por merchant
 
 ---
 
@@ -216,13 +321,14 @@ Pendiente del Módulo 1 (no crítico para MVP):
 
 ### SIEMPRE
 1. `authenticate.admin(request)` al inicio de cada loader/action bajo `/app`
-2. `authenticate.webhook(request)` en todos los handlers de webhook
+2. `authenticate.webhook(request)` en todos los handlers de webhook de Shopify
 3. Filtrar por `shop_id` en CADA query a Supabase
 4. `safeRedirect(request, path)` en lugar de `redirect(path)` para redirects entre rutas `/app`
-5. Llamar `refreshSkuAnalytics()` después de cualquier write a `skus` o `inventory_levels`
+5. Llamar `refreshSkuAnalytics()` después de cualquier write a `skus`, `inventory_levels` o `sales_history`
 6. Archivos `.server.ts` para todo lo que corre en servidor
 7. Webhooks idempotentes — procesar el mismo evento dos veces no rompe nada
 8. TypeScript estricto — sin `any`
+9. Todo cálculo de analytics/forecast/KPIs debe leer desde `sku_analytics`, no desde las tablas base
 
 ### NUNCA
 - ❌ `shopify.navigate()` — no existe en App Bridge v4
@@ -234,6 +340,8 @@ Pendiente del Módulo 1 (no crítico para MVP):
 - ❌ Queries a Supabase sin filtro `shop_id`
 - ❌ Ignorar los webhooks GDPR
 - ❌ Modificar `app/routes/auth.$.tsx` ni `app/routes/auth.login/`
+- ❌ Calcular métricas de analytics directamente desde `skus`, `inventory_levels` o `sales_history` — usar `sku_analytics`
+- ❌ Hacer polling de jobs con `authenticate.admin()` en el fetcher — usar `/api/sync/status?jobId=`
 
 ---
 
@@ -247,6 +355,9 @@ npm run dev                      # Shopify CLI + Remix dev server
 npx supabase start               # Levantar Supabase local
 npx supabase db reset            # Limpiar DB y re-aplicar todas las migrations
 npx supabase gen types typescript --local > app/types/supabase.ts
+
+# Seed de datos de prueba (después de importar productos)
+psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" -f supabase/seed.sql
 
 # Verificar DB
 PGPASSWORD=postgres psql -h 127.0.0.1 -p 54322 -U postgres -d postgres
@@ -279,3 +390,4 @@ app/entry.server.tsx            # Entry point del servidor
 | `@supabase-migration-agent` | Schema SQL, migrations, RLS policies |
 | `@forecast-agent` | Algoritmos de forecasting, dead stock, ABC analysis |
 | `@compliance-agent` | GDPR, Billing API, checklist Built for Shopify |
+| `@integrations-agent` | Adaptadores de ERP/POS (Bsale, Aspel, Siigo) |
