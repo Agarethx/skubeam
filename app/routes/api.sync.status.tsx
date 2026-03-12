@@ -1,0 +1,32 @@
+import type { LoaderFunctionArgs } from "react-router";
+import { supabaseAdmin } from "../db.server";
+
+/**
+ * GET /api/sync/status?jobId=<uuid>
+ *
+ * Unauthenticated polling endpoint — does NOT call authenticate.admin().
+ * The jobId UUID is unguessable, so no additional auth is needed for this
+ * read-only status check.  The forecast page uses this to poll while a
+ * bulk-operation job is running, avoiding the ?shop=&host= requirement
+ * that authenticate.admin() imposes.
+ */
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const url   = new URL(request.url);
+  const jobId = url.searchParams.get("jobId");
+
+  if (!jobId) {
+    return { status: null, records_processed: 0, type: null };
+  }
+
+  const { data } = await supabaseAdmin
+    .from("sync_jobs")
+    .select("status, records_processed, type")
+    .eq("id", jobId)
+    .maybeSingle();
+
+  return {
+    status:            data?.status            ?? null,
+    records_processed: data?.records_processed ?? 0,
+    type:              data?.type              ?? null,
+  };
+};

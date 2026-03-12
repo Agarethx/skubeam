@@ -143,6 +143,7 @@ export type Database = {
           id: string
           quantity_sold: number
           shop_id: string
+          shopify_line_item_id: number | null
           shopify_order_id: number | null
           sku_id: string
           sold_at: string
@@ -151,6 +152,7 @@ export type Database = {
           id?: string
           quantity_sold: number
           shop_id: string
+          shopify_line_item_id?: number | null
           shopify_order_id?: number | null
           sku_id: string
           sold_at: string
@@ -159,6 +161,7 @@ export type Database = {
           id?: string
           quantity_sold?: number
           shop_id?: string
+          shopify_line_item_id?: number | null
           shopify_order_id?: number | null
           sku_id?: string
           sold_at?: string

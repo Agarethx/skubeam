@@ -136,7 +136,11 @@ export async function checkAndAdvanceBulkSync(
   if (op.id !== job.operation_id) return job;
 
   if (op.status === "COMPLETED" && op.url) {
-    await processBulkJsonl(op.url, shopId, job.id);
+    if (job.type === "orders_sync") {
+      await processOrdersJsonl(op.url, shopId, job.id);
+    } else {
+      await processBulkJsonl(op.url, shopId, job.id);
+    }
     return { ...job, status: "completed" as const };
   }
 
@@ -165,7 +169,216 @@ export async function checkAndAdvanceBulkSync(
   return job;
 }
 
-// ── Process JSONL ─────────────────────────────────────────────────────────────
+// ── Orders bulk sync ──────────────────────────────────────────────────────────
+
+export async function startOrdersSync(
+  admin: { graphql: (query: string) => Promise<Response> },
+  shopId: string,
+) {
+  const active = await getActiveSyncJob(shopId);
+  if (active) return active;
+
+  const since = new Date();
+  since.setFullYear(since.getFullYear() - 1);
+  const sinceDate = since.toISOString().split("T")[0];
+
+  const mutation = `#graphql
+    mutation {
+      bulkOperationRunQuery(
+        query: """
+          {
+            orders(query: "created_at:>=${sinceDate}") {
+              edges {
+                node {
+                  id
+                  createdAt
+                  lineItems {
+                    edges {
+                      node {
+                        id
+                        quantity
+                        variant { id }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        """
+      ) {
+        bulkOperation { id status }
+        userErrors { field message }
+      }
+    }`;
+
+  const response = await admin.graphql(mutation);
+  const json = await response.json() as {
+    data?: {
+      bulkOperationRunQuery?: {
+        bulkOperation?: { id: string; status: string };
+        userErrors: Array<{ field: string; message: string }>;
+      };
+    };
+  };
+
+  const result = json.data?.bulkOperationRunQuery;
+  if (result?.userErrors && result.userErrors.length > 0) {
+    throw new Error(result.userErrors[0].message);
+  }
+
+  const operationId = result?.bulkOperation?.id;
+  if (!operationId) throw new Error("Shopify no devolvió un ID de operación para órdenes.");
+
+  const { data, error } = await supabaseAdmin
+    .from("sync_jobs")
+    .insert({
+      shop_id: shopId,
+      type: "orders_sync",
+      status: "running",
+      operation_id: operationId,
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(`startOrdersSync DB: ${error.message}`);
+  return data;
+}
+
+// ── Process Orders JSONL ───────────────────────────────────────────────────────
+
+export async function processOrdersJsonl(
+  jsonlUrl: string,
+  shopId: string,
+  jobId: string,
+) {
+  const fetchResponse = await fetch(jsonlUrl);
+  if (!fetchResponse.ok) {
+    throw new Error(`processOrdersJsonl: HTTP ${fetchResponse.status}`);
+  }
+
+  const text = await fetchResponse.text();
+  const lines = text.trim().split("\n").filter(Boolean);
+
+  // Pass 1: collect order createdAt timestamps
+  const orderMap = new Map<string, string>(); // orderId GID → createdAt ISO
+
+  for (const line of lines) {
+    const node = JSON.parse(line) as {
+      id: string;
+      __parentId?: string;
+      createdAt?: string;
+    };
+    if (!node.__parentId && node.createdAt) {
+      orderMap.set(node.id, node.createdAt);
+    }
+  }
+
+  // Pass 2: collect line items
+  const lineItems: Array<{
+    variantGid: string;
+    lineItemId: number;
+    quantity: number;
+    orderGid: string;
+  }> = [];
+
+  for (const line of lines) {
+    const node = JSON.parse(line) as {
+      id: string;
+      __parentId?: string;
+      quantity?: number;
+      variant?: { id: string } | null;
+    };
+    if (
+      node.__parentId &&
+      node.variant?.id &&
+      (node.quantity ?? 0) > 0
+    ) {
+      lineItems.push({
+        variantGid:  node.variant.id,
+        lineItemId:  parseInt(node.id.split("/").pop()!, 10),
+        quantity:    node.quantity!,
+        orderGid:    node.__parentId,
+      });
+    }
+  }
+
+  if (lineItems.length === 0) {
+    await supabaseAdmin
+      .from("sync_jobs")
+      .update({ status: "completed", records_processed: 0, completed_at: new Date().toISOString() })
+      .eq("id", jobId);
+    return 0;
+  }
+
+  // Lookup sku_id by shopify_variant_id
+  const variantIds = [...new Set(
+    lineItems.map((li) => parseInt(li.variantGid.split("/").pop()!, 10)),
+  )];
+
+  const { data: skus } = await supabaseAdmin
+    .from("skus")
+    .select("id, shopify_variant_id")
+    .eq("shop_id", shopId)
+    .in("shopify_variant_id", variantIds);
+
+  const skuMap = new Map<number, string>(); // shopify_variant_id → sku uuid
+  for (const sku of skus ?? []) {
+    if (sku.shopify_variant_id != null) {
+      skuMap.set(sku.shopify_variant_id, sku.id);
+    }
+  }
+
+  // Build rows
+  const now = new Date().toISOString();
+  const rows: object[] = [];
+
+  for (const li of lineItems) {
+    const variantId = parseInt(li.variantGid.split("/").pop()!, 10);
+    const skuId     = skuMap.get(variantId);
+    const soldAt    = orderMap.get(li.orderGid);
+    const orderId   = parseInt(li.orderGid.split("/").pop()!, 10);
+
+    if (!skuId || !soldAt) continue;
+
+    rows.push({
+      shop_id:               shopId,
+      sku_id:                skuId,
+      shopify_order_id:      orderId,
+      shopify_line_item_id:  li.lineItemId,
+      quantity_sold:         li.quantity,
+      sold_at:               soldAt,
+    });
+  }
+
+  // Upsert in batches (idempotent via unique index on sku_id, shopify_line_item_id)
+  let processed = 0;
+  for (let i = 0; i < rows.length; i += 500) {
+    const batch = rows.slice(i, i + 500);
+    const { error } = await supabaseAdmin
+      .from("sales_history")
+      .upsert(batch, { onConflict: "sku_id,shopify_line_item_id" });
+    if (error) {
+      console.error(`processOrdersJsonl batch ${i}:`, error.message);
+    } else {
+      processed += batch.length;
+    }
+  }
+
+  await supabaseAdmin
+    .from("sync_jobs")
+    .update({
+      status: "completed",
+      records_processed: processed,
+      completed_at: now,
+    })
+    .eq("id", jobId);
+
+  await refreshSkuAnalytics();
+  return processed;
+}
+
+// ── Process Products JSONL ─────────────────────────────────────────────────────
 
 export async function processBulkJsonl(
   jsonlUrl: string,
