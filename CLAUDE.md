@@ -4,71 +4,56 @@
 
 **SkuBeam** es una app embebida de Shopify para gestión de inventario y SKUs, dirigida a merchants mid-market (500–10k SKUs). Construida exclusivamente para Shopify con objetivo de certificación **"Built for Shopify"**.
 
-Stack: **Remix (React Router v7) + Supabase + Shopify App Bridge + Polaris**
+Stack: **React Router v7 (Remix) + Supabase + Shopify App Bridge v4 + Polaris web components**
 
 ---
 
-## Estructura real del proyecto
+## Estructura actual del proyecto
 
 ```
 skubeam/
 ├── app/
 │   ├── routes/
-│   │   ├── app.tsx                          # Layout principal con AppProvider
-│   │   ├── app._index.tsx                   # Dashboard /app
-│   │   ├── app.additional.tsx               # Ejemplo del scaffold — puede borrarse
-│   │   ├── auth.$.tsx                       # OAuth — NO TOCAR
-│   │   ├── auth.login/                      # Login flow — NO TOCAR
-│   │   ├── webhooks.app.uninstalled.tsx     # APP_UNINSTALLED webhook
-│   │   ├── webhooks.app.scopes_update.tsx   # Scopes update webhook
-│   │   │
-│   │   # RUTAS A CREAR:
-│   │   ├── app.skus._index.tsx              # Lista de SKUs
-│   │   ├── app.skus.$id.tsx                 # Detalle de SKU
-│   │   ├── app.skus.new.tsx                 # Crear SKU
-│   │   ├── app.forecast.tsx                 # Forecasting
-│   │   ├── app.analytics.tsx                # Analytics / ABC analysis
-│   │   ├── app.settings.tsx                 # Config del merchant
-│   │   ├── webhooks.gdpr.tsx                # GDPR handlers (obligatorio)
-│   │   └── api.sync.tsx                     # Trigger sync manual
+│   │   ├── app.tsx                           # Layout + AppProvider + s-app-nav
+│   │   ├── app._index.tsx                    # Dashboard /app
+│   │   ├── app.skus._index.tsx               # Lista de SKUs con filtros y sync
+│   │   ├── app.skus.$id.tsx                  # Detalle de SKU: edición, barcode, health score
+│   │   ├── auth.$.tsx                        # OAuth — NO TOCAR
+│   │   ├── auth.login/                       # Login flow — NO TOCAR
+│   │   ├── api.sync.tsx                      # GET polling + POST trigger de sync
+│   │   ├── webhooks.app.uninstalled.tsx      # APP_UNINSTALLED
+│   │   ├── webhooks.app.scopes_update.tsx    # Scopes update
+│   │   ├── webhooks.bulk_operations.finish.tsx # BULK_OPERATIONS_FINISH
+│   │   ├── webhooks.products.update.tsx      # PRODUCTS_UPDATE → upsertSkuFromShopify
+│   │   └── webhooks.gdpr.tsx                 # CUSTOMERS_DATA_REQUEST/REDACT, SHOP_REDACT
 │   │
-│   ├── db.server.ts                         # REEMPLAZAR: era Prisma, ahora Supabase
-│   ├── shopify.server.ts                    # Config Shopify — MODIFICAR session storage
-│   ├── entry.server.tsx                     # No tocar
-│   ├── root.tsx                             # Root layout
-│   ├── routes.ts                            # Registro de rutas
-│   │
-│   # CARPETAS A CREAR:
 │   ├── lib/
-│   │   ├── supabase.server.ts               # Cliente Supabase con tenant isolation
-│   │   └── billing.server.ts                # Shopify Billing API
-│   └── models/
-│       ├── sku.server.ts                    # CRUD de SKUs
-│       ├── inventory.server.ts              # Queries de inventario
-│       └── forecast.server.ts              # Lógica de forecasting
+│   │   ├── barcode.server.ts                 # generateBarcode() con @bwip-js/node
+│   │   ├── navigate.ts                       # useSkuBeamNavigate, useShopifyParams
+│   │   ├── server.ts                         # safeRedirect (preserva ?shop=&host=)
+│   │   └── supabase-session-storage.server.ts # SupabaseSessionStorage para OAuth
+│   │
+│   ├── models/
+│   │   ├── shop.server.ts                    # upsertShop, getShop, checkSkuLimit
+│   │   ├── sku.server.ts                     # CRUD + upsertSkuFromShopify + health score
+│   │   └── sync.server.ts                    # startBulkSync, processBulkJsonl, refreshSkuAnalytics
+│   │
+│   ├── types/
+│   │   └── supabase.ts                       # Generado: npx supabase gen types typescript --local
+│   │
+│   ├── db.server.ts                          # supabaseAdmin (service role)
+│   └── shopify.server.ts                     # shopifyApp config + webhooks + afterAuth
 │
 ├── supabase/
-│   ├── migrations/                          # SQL migrations versionadas
-│   └── seed.sql                             # Datos de desarrollo
-│
-├── prisma/                                  # ELIMINAR después de migrar a Supabase
-│   ├── schema.prisma
 │   └── migrations/
+│       ├── 001_shopify_sessions.sql          # Tabla shopify_sessions + RLS
+│       ├── 003_shops.sql                     # Tabla shops con sku_limit
+│       └── 20260311120654_initial_schema.sql # skus, inventory_levels, sales_history,
+│                                             # sync_jobs, forecast_configs, gdpr_requests,
+│                                             # sku_analytics (materialized view)
 │
-├── extensions/                              # Shopify extensions (futuro)
-├── shopify.app.toml                         # Config de la app — REVISAR scopes
-├── shopify.web.toml                         # Scripts de dev/build
-├── CLAUDE.md                                # Este archivo
-└── .claude/
-    ├── agents/
-    │   ├── shopify-sync-agent.md
-    │   ├── supabase-migration-agent.md
-    │   ├── forecast-agent.md
-    │   └── compliance-agent.md
-    └── skills/
-        ├── shopify-api/SKILL.md
-        ├── remix-shopify/SKILL.md
-        └── supabase-patterns/SKILL.md
+├── shopify.app.toml                          # Scopes + webhooks registrados
+└── CLAUDE.md                                 # Este archivo
 ```
 
 ---
@@ -77,135 +62,79 @@ skubeam/
 
 | Capa | Tecnología | Notas |
 |---|---|---|
-| Framework | Remix / React Router v7 | Scaffold de Shopify CLI |
-| UI | Shopify Polaris v13 | Obligatorio para Built for Shopify |
-| App Bridge | @shopify/app-bridge-react | Embedded app en Shopify Admin |
-| DB / Auth | Supabase | Reemplaza Prisma del scaffold |
-| Session Storage | Supabase (custom adapter) | Reemplaza SQLite del scaffold |
-| ORM | Supabase JS client + RLS | Multi-tenant por shop_id |
-| Jobs async | Supabase Edge Functions | Forecasting batch, sync masivo |
-| Deploy | Fly.io | Remix server-side |
+| Framework | React Router v7 (Remix) | Scaffold de Shopify CLI |
+| UI | Polaris web components (`s-*`) | Polaris v13, obligatorio para Built for Shopify |
+| App Bridge | @shopify/app-bridge-react v4 | No expone `navigate()` — usar React Router |
+| DB | Supabase (PostgreSQL) | Multi-tenant por `shop_id` |
+| Session Storage | SupabaseSessionStorage (custom) | Reemplaza SQLite/Prisma del scaffold |
+| Barcodes | @bwip-js/node | ESM nativo — NO usar `bwip-js` (sin ESM) |
+| Deploy | Fly.io | Server-side Remix |
 | Testing | Vitest | Unit tests |
 
 ---
 
-## MIGRACIÓN PRISMA → SUPABASE
+## Decisiones técnicas tomadas
 
-### Estado actual del scaffold
-El CLI generó Prisma + SQLite para manejar sesiones OAuth. Hay que reemplazarlo.
+### Navegación en app embebida (App Bridge v4)
+App Bridge v4 **no expone `shopify.navigate()`** — la interfaz `ShopifyGlobal` solo tiene `toast`, `loading`, `modal`, `resourcePicker`, `intents`.
 
-### Paso 1 — Instalar dependencias
-```bash
-npm install @supabase/supabase-js
-npm install @supabase/auth-helpers-remix
-npm uninstall @prisma/client prisma @shopify/shopify-app-session-storage-prisma
-```
+Patrón correcto en `app/lib/navigate.ts`:
+- `useSkuBeamNavigate()` — usa `shopify.loading(true)` + React Router `useNavigate()` para SPA navigation sin recargar el iframe
+- `useShopifyParams()` — devuelve `?shop=X&host=Y` para añadir a hrefs estáticos (`s-link`, `<a>`)
+- `app.tsx` → `useEffect` limpia `shopify.loading(false)` cuando `navigation.state === "idle"`
+- `s-app-nav` links son interceptados nativamente por App Bridge — no necesitan `useSkuBeamNavigate`
 
-### Paso 2 — Reemplazar app/db.server.ts
+### Redirects server-side
+`redirect()` sin `?shop=&host=` hace que App Bridge pierda el contexto del iframe. Siempre usar:
 ```typescript
-// app/db.server.ts — REEMPLAZAR TODO el contenido por:
-import { createClient } from "@supabase/supabase-js";
-
-if (!process.env.SUPABASE_URL) throw new Error("SUPABASE_URL is required");
-if (!process.env.SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is required");
-
-// Cliente con service role — solo server-side, nunca al browser
-export const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-// Helper con tenant isolation — usar en modelos
-export function getShopClient(shopId: string) {
-  return {
-    client: supabaseAdmin,
-    shopId,
-    // Siempre filtra por shop_id automáticamente
-    from: (table: string) => supabaseAdmin.from(table).eq("shop_id", shopId),
-  };
-}
+// app/lib/server.ts
+return safeRedirect(request, "/app/skus");  // preserva ?shop=&host=
 ```
 
-### Paso 3 — Reemplazar session storage en shopify.server.ts
+### SupabaseSessionStorage — fix crítico
+La columna `state` en `shopify_sessions` es `NOT NULL`. Durante OAuth, `session.state` puede ser `undefined`. Sin el fix, `storeSession` falla silenciosamente y la sesión nunca se guarda → loop infinito de OAuth.
+
 ```typescript
-// app/shopify.server.ts — cambiar el sessionStorage:
-
-import { SupabaseSessionStorage } from "~/lib/supabase-session-storage.server";
-
-// Reemplazar:
-// sessionStorage: new PrismaSessionStorage(prisma),
-// Por:
-sessionStorage: new SupabaseSessionStorage(supabaseAdmin),
+// app/lib/supabase-session-storage.server.ts
+state: session.state ?? "",  // ← fix crítico
 ```
 
-### Paso 4 — Crear el adapter de sesiones para Supabase
-Ver `.claude/skills/supabase-patterns/SKILL.md` para implementación completa.
+### Barcodes — @bwip-js/node
+`bwip-js` (el paquete base) usa exports condicionales: con `moduleResolution: "Bundler"` TypeScript resuelve el build de browser que **no tiene `toBuffer`**. En runtime, Vite SSR lanza `require is not defined`.
 
-### Paso 5 — Actualizar shopify.web.toml
+Solución: usar `@bwip-js/node` que tiene `"import": "./dist/bwip-js-node.mjs"` (ESM nativo):
+```typescript
+import { toBuffer } from "@bwip-js/node";  // ✅
+// import bwipjs from "bwip-js";            // ❌ falla en Vite SSR
+// createRequire workaround                  // ❌ descartado
+```
+Pasar `width: undefined` a `toBuffer` lanza error — usar spread condicional:
+```typescript
+...(type === "QR" ? { width: 30 } : {})
+```
+
+### sku_analytics — vista materializada
+`sku_analytics` es una **materialized view** — no se actualiza automáticamente. Hay que llamar `refreshSkuAnalytics()` explícitamente después de cada write:
+- `processBulkJsonl()` → llama refresh al final del bulk sync
+- `syncSkuFromShopify()` → llama refresh después de sync individual
+- `upsertSkuFromShopify()` → llama refresh después de webhook update
+
+La función SQL `refresh_sku_analytics()` usa `REFRESH MATERIALIZED VIEW CONCURRENTLY` (no bloquea lecturas) con índice único en `id`.
+
+### Scopes actuales (shopify.app.toml)
 ```toml
-[commands]
-# Eliminar línea de prisma migrate:
-# predev = "npx prisma migrate deploy"
-dev = "npm exec remix vite:dev"
-```
-
-### Paso 6 — Borrar Prisma
-```bash
-rm -rf prisma/
-```
-
----
-
-## shopify.app.toml — Scopes necesarios
-
-```toml
-[access_scopes]
 scopes = "read_products,write_products,read_inventory,write_inventory,read_orders,read_locations"
-
-# Webhooks obligatorios
-[[webhooks.subscriptions]]
-topics = ["app/uninstalled"]
-uri = "/webhooks/app/uninstalled"
-
-[[webhooks.subscriptions]]
-topics = ["products/update"]
-uri = "/webhooks/products/update"
-
-[[webhooks.subscriptions]]
-topics = ["inventory_levels/update"]
-uri = "/webhooks/inventory_levels/update"
-
-# GDPR — sin estos Shopify rechaza la app
-[[webhooks.subscriptions]]
-topics = ["customers/data_request"]
-uri = "/webhooks/gdpr"
-
-[[webhooks.subscriptions]]
-topics = ["customers/redact"]
-uri = "/webhooks/gdpr"
-
-[[webhooks.subscriptions]]
-topics = ["shop/redact"]
-uri = "/webhooks/gdpr"
 ```
+El scope anterior del scaffold (`write_metaobject_definitions,...`) causaba scope mismatch con `expiringOfflineAccessTokens: true` → loop de re-auth → `shop: null` en logs.
 
----
-
-## Variables de entorno (.env)
-
-```env
-# Ya generadas por Shopify CLI:
-SHOPIFY_API_KEY=
-SHOPIFY_API_SECRET=
-SHOPIFY_APP_URL=
-
-# Agregar estas:
-SUPABASE_URL=
-SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=   # NUNCA exponer al cliente
-
-# App
-NODE_ENV=development
+### Webhooks registrados en shopify.server.ts
+```
+APP_UNINSTALLED         → /webhooks/app/uninstalled
+BULK_OPERATIONS_FINISH  → /webhooks/bulk_operations/finish
+PRODUCTS_UPDATE         → /webhooks/products/update
+CUSTOMERS_DATA_REQUEST  → /webhooks/gdpr
+CUSTOMERS_REDACT        → /webhooks/gdpr
+SHOP_REDACT             → /webhooks/gdpr
 ```
 
 ---
@@ -215,44 +144,70 @@ NODE_ENV=development
 ### Principios de multi-tenancy
 - **`shop_id` en todas las tablas** — es el dominio Shopify (`mi-tienda.myshopify.com`)
 - **RLS activo en todas las tablas** — sin excepciones
-- **Migrations versionadas** en `supabase/migrations/`
+- **Migrations en orden**: `001_` → `003_` → `20260311...`
 - **Nunca queries sin filtrar por `shop_id`**
+- **Regenerar tipos** tras cualquier cambio de schema: `npx supabase gen types typescript --local > app/types/supabase.ts`
 
-### Tablas principales
+### Schema actual
 ```
-shops              → Un registro por merchant instalado
-skus               → SKUs/variantes sincronizadas desde Shopify
+shopify_sessions   → OAuth sessions (SupabaseSessionStorage)
+shops              → Un registro por merchant (plan, sku_limit, is_active)
+skus               → Variantes de Shopify sincronizadas
 inventory_levels   → Stock por location
-sales_history      → Historial para forecasting (particionado por año)
-sync_jobs          → Tracking de sincronizaciones
+sales_history      → Historial para forecasting
+sync_jobs          → Tracking de bulk operations
 forecast_configs   → Config de reorder point por merchant
+gdpr_requests      → Auditoría GDPR
+sku_analytics      → Materialized view: total_stock, sold_30d, sold_90d, last_sold_at
 ```
 
-Ver `.claude/agents/supabase-migration-agent.md` para el schema SQL completo.
+### shops.sku_limit
+```
+plan = "trial"  → sku_limit = 500   (default)
+plan = "basic"  → sku_limit = 2000
+plan = "pro"    → sku_limit = -1    (unlimited)
+```
+Consultar con `checkSkuLimit(shopId)` de `app/models/shop.server.ts`.
 
 ---
 
 ## Módulos del producto
 
-### Módulo 1: SKU Intelligence (MVP — construir primero)
-- [ ] Reemplazar Prisma por Supabase (PRIMER PASO)
-- [ ] Sync inicial de productos desde Shopify al instalar
-- [ ] Lista de SKUs con búsqueda y filtros (Polaris DataTable)
-- [ ] Detalle de SKU con edición
-- [ ] SKU health score (sin barcode, sin imagen = penalización)
-- [ ] Generador de barcodes (Code128, QR, EAN-13)
-- [ ] Bulk operations: archivar, exportar CSV
-- [ ] Detección de duplicados
+### ✅ Módulo 1: SKU Intelligence — COMPLETADO
+- [x] Reemplazar Prisma por Supabase (session storage + modelos)
+- [x] `upsertShop` en `afterAuth` hook (install + reinstall)
+- [x] Sync bulk inicial desde Shopify (bulk operations GraphQL, ~7s para 147 SKUs)
+- [x] Lista de SKUs con búsqueda, filtro por estado y paginación
+- [x] Banner de progreso de sync con polling cada 5s
+- [x] Detalle de SKU con formulario editable (sku_code, barcode, vendor, cost_price)
+- [x] Health score con desglose de criterios (título, barcode, vendor, costo, stock, ventas)
+- [x] Stock por location con tabla
+- [x] Ventas 30d / 90d
+- [x] Sync individual de SKU desde Shopify (intent `sync` en detalle)
+- [x] Archivar / reactivar SKU
+- [x] Generador de barcodes: CODE128, QR, EAN-13, EAN-8 (con @bwip-js/node)
+- [x] Imprimir barcode (abre imagen en nueva pestaña)
+- [x] Webhook PRODUCTS_UPDATE → `upsertSkuFromShopify` (idempotente)
+- [x] Webhooks GDPR (obligatorio para Built for Shopify)
+- [x] `checkSkuLimit` por plan
 
-### Módulo 2: Forecast & Replenishment
-- [ ] Velocidad de ventas por SKU (moving average 30d)
-- [ ] Reorder point automático
-- [ ] Dead stock detector
-- [ ] PO generator (PDF)
+Pendiente del Módulo 1 (no crítico para MVP):
+- [ ] Exportar CSV
+- [ ] Detección de duplicados
+- [ ] Bulk archivar (selección múltiple)
+
+### 🔜 Módulo 2: Forecast & Replenishment — SIGUIENTE
+- [ ] Importar `sales_history` desde Shopify Orders API
+- [ ] Velocidad de ventas por SKU (moving average 30d / 90d)
+- [ ] Reorder point automático = (velocidad_diaria × lead_days) + safety_stock
+- [ ] Dead stock detector (sin ventas en N días con stock > 0)
+- [ ] Vista `app.forecast.tsx` con tabla de SKUs en riesgo
+- [ ] `forecast_configs` editable por merchant (lead_days, safety_stock_days)
+- [ ] PO generator (exportar PDF con SKUs a reponer)
 
 ### Módulo 3: Analytics
-- [ ] ABC analysis automática
-- [ ] Dashboard de margen por SKU
+- [ ] ABC analysis automática (A=top 80% ventas, B=15%, C=5%)
+- [ ] Dashboard de margen por SKU (precio − costo)
 - [ ] Exportar reportes CSV
 
 ---
@@ -261,29 +216,24 @@ Ver `.claude/agents/supabase-migration-agent.md` para el schema SQL completo.
 
 ### SIEMPRE
 1. `authenticate.admin(request)` al inicio de cada loader/action bajo `/app`
-2. Filtrar por `shop_id` en CADA query a Supabase
-3. Usar Polaris para toda la UI — no CSS custom salvo casos extremos
-4. Archivos `.server.ts` para todo lo que corre en servidor
-5. Webhooks idempotentes — procesar el mismo evento dos veces no rompe nada
-6. TypeScript estricto — sin `any`
+2. `authenticate.webhook(request)` en todos los handlers de webhook
+3. Filtrar por `shop_id` en CADA query a Supabase
+4. `safeRedirect(request, path)` en lugar de `redirect(path)` para redirects entre rutas `/app`
+5. Llamar `refreshSkuAnalytics()` después de cualquier write a `skus` o `inventory_levels`
+6. Archivos `.server.ts` para todo lo que corre en servidor
+7. Webhooks idempotentes — procesar el mismo evento dos veces no rompe nada
+8. TypeScript estricto — sin `any`
 
 ### NUNCA
+- ❌ `shopify.navigate()` — no existe en App Bridge v4
+- ❌ `window.location.href` para navegación interna — rompe el contexto del iframe
+- ❌ `redirect()` sin `safeRedirect` entre rutas `/app`
+- ❌ `import bwipjs from "bwip-js"` — usar `@bwip-js/node`
 - ❌ Llamar a Admin API desde el browser — siempre server-side
 - ❌ `SUPABASE_SERVICE_ROLE_KEY` en código cliente
 - ❌ Queries a Supabase sin filtro `shop_id`
 - ❌ Ignorar los webhooks GDPR
-- ❌ Modificar `app/routes/auth.$.tsx` — es el OAuth flow
-- ❌ Modificar `app/routes/auth.login/` — es el login flow
-
----
-
-## Archivos del scaffold que NO tocar
-
-```
-app/routes/auth.$.tsx           # OAuth splat route
-app/routes/auth.login/          # Login UI
-app/entry.server.tsx            # Entry point del servidor
-```
+- ❌ Modificar `app/routes/auth.$.tsx` ni `app/routes/auth.login/`
 
 ---
 
@@ -295,22 +245,33 @@ npm run dev                      # Shopify CLI + Remix dev server
 
 # Supabase local
 npx supabase start               # Levantar Supabase local
-npx supabase db push             # Aplicar migrations
+npx supabase db reset            # Limpiar DB y re-aplicar todas las migrations
 npx supabase gen types typescript --local > app/types/supabase.ts
 
-# Shopify
-shopify app info                 # Ver config de la app
-shopify app deploy               # Deploy a Shopify Partners
+# Verificar DB
+PGPASSWORD=postgres psql -h 127.0.0.1 -p 54322 -U postgres -d postgres
 
-# Limpiar tunnel si se cuelga
-shopify app dev --reset
+# TypeScript
+npx tsc --noEmit                 # Verificar tipos sin compilar
+
+# Shopify
+shopify app deploy               # Deploy a Shopify Partners
+shopify app dev --reset          # Limpiar tunnel si se cuelga
+```
+
+---
+
+## Archivos que NO tocar
+
+```
+app/routes/auth.$.tsx           # OAuth splat route
+app/routes/auth.login/          # Login UI
+app/entry.server.tsx            # Entry point del servidor
 ```
 
 ---
 
 ## Agentes disponibles
-
-Invocar en Claude Code con `@nombre-del-agente`:
 
 | Agente | Cuándo usarlo |
 |---|---|

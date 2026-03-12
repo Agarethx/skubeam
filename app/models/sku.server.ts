@@ -125,6 +125,102 @@ export async function unarchiveSku(shopId: string, id: string) {
   if (error) throw new Error(`unarchiveSku: ${error.message}`);
 }
 
+// ── Webhook upsert ───────────────────────────────────────────────────────────
+
+export interface ShopifyVariantPayload {
+  shopify_variant_id: number;
+  shopify_product_id: number;
+  sku_code: string;
+  barcode: string | null;
+  title: string | null;
+  vendor: string | null;
+  product_type: string | null;
+  tags: string[];
+  status: string;
+}
+
+/**
+ * Idempotent upsert driven by PRODUCTS_UPDATE webhook data.
+ *
+ * Rules:
+ * - Existing SKU → UPDATE only webhook-controlled fields.
+ *   barcode is updated only when Shopify sends a non-empty value,
+ *   preserving any barcode the merchant generated locally.
+ *   cost_price and barcode_type are never touched (merchant-managed).
+ * - New variant → INSERT with all available fields.
+ * - Variants without a sku_code are silently skipped (not trackable).
+ * - Running twice with the same payload is safe (idempotent by design).
+ */
+export async function upsertSkuFromShopify(
+  shopId: string,
+  variants: ShopifyVariantPayload[],
+): Promise<void> {
+  const trackable = variants.filter((v) => v.sku_code.trim());
+  if (trackable.length === 0) return;
+
+  const now = new Date().toISOString();
+
+  // One SELECT to find all existing rows for these variant IDs
+  const { data: existing } = await supabaseAdmin
+    .from("skus")
+    .select("id, shopify_variant_id, barcode")
+    .eq("shop_id", shopId)
+    .in(
+      "shopify_variant_id",
+      trackable.map((v) => v.shopify_variant_id),
+    );
+
+  const existingMap = new Map(
+    (existing ?? []).map((s) => [s.shopify_variant_id, s]),
+  );
+
+  const toInsert: object[] = [];
+
+  for (const v of trackable) {
+    const shopifyBarcode = v.barcode?.trim() || null;
+    const found = existingMap.get(v.shopify_variant_id);
+
+    if (found) {
+      await supabaseAdmin
+        .from("skus")
+        .update({
+          sku_code:     v.sku_code,
+          title:        v.title,
+          vendor:       v.vendor,
+          product_type: v.product_type,
+          tags:         v.tags,
+          status:       v.status,
+          // Only overwrite barcode if Shopify provides one;
+          // otherwise keep whatever the merchant set locally.
+          ...(shopifyBarcode !== null ? { barcode: shopifyBarcode } : {}),
+          updated_at: now,
+        })
+        .eq("id", found.id);
+    } else {
+      toInsert.push({
+        shop_id:           shopId,
+        shopify_variant_id: v.shopify_variant_id,
+        shopify_product_id: v.shopify_product_id,
+        sku_code:          v.sku_code,
+        barcode:           shopifyBarcode,
+        title:             v.title,
+        vendor:            v.vendor,
+        product_type:      v.product_type,
+        tags:              v.tags,
+        status:            v.status,
+        updated_at:        now,
+      });
+    }
+  }
+
+  if (toInsert.length > 0) {
+    const { error } = await supabaseAdmin.from("skus").insert(toInsert);
+    if (error) console.error("[upsertSkuFromShopify] insert:", error.message);
+  }
+
+  await refreshSkuAnalytics();
+}
+
 // Upsert the SKU record and its inventory levels after a Shopify sync
 export async function syncSkuFromShopify(
   shopId: string,
