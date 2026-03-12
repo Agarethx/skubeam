@@ -8,6 +8,8 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { safeRedirect } from "../lib/server";
 import { useSkuBeamNavigate } from "../lib/navigate";
+import { generateBarcode } from "../lib/barcode.server";
+import type { BarcodeType } from "../lib/barcode.server";
 import {
   getSkuById,
   getSkuAnalytics,
@@ -33,7 +35,14 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
 
   const { score, criteria } = computeHealthScore(sku, analytics);
 
-  return { sku, analytics, inventoryLevels, score, criteria };
+  const barcodeDataUrl = sku.barcode
+    ? await generateBarcode(
+        sku.barcode,
+        (sku.barcode_type as BarcodeType) ?? "CODE128",
+      ).catch(() => null)
+    : null;
+
+  return { sku, analytics, inventoryLevels, score, criteria, barcodeDataUrl };
 };
 
 // ── Action ───────────────────────────────────────────────────────────────────
@@ -62,6 +71,25 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       cost_price: costPrice,
     });
     return { success: "SKU actualizado correctamente." };
+  }
+
+  if (intent === "generate_barcode") {
+    const code = (formData.get("barcode_code") as string | null)?.trim();
+    const type = ((formData.get("barcode_type") as string) || "CODE128") as BarcodeType;
+
+    if (!code) return { error: "Ingresa un código para generar el barcode." };
+
+    let barcodeDataUrl: string;
+    try {
+      barcodeDataUrl = await generateBarcode(code, type);
+    } catch {
+      return { error: `No se pudo generar el barcode: código inválido para ${type}.` };
+    }
+
+    // Persist so health score reflects the new barcode immediately
+    await updateSku(session.shop, id, { barcode: code, barcode_type: type });
+
+    return { success: "Barcode generado y guardado.", barcodeDataUrl };
   }
 
   if (intent === "archive") {
@@ -96,14 +124,14 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
           }
           inventoryItem {
             unitCost { amount }
-          }
-          inventoryLevels(first: 20) {
-            edges {
-              node {
-                location { id name }
-                quantities(names: ["available"]) {
-                  name
-                  quantity
+            inventoryLevels(first: 10) {
+              edges {
+                node {
+                  quantities(names: ["available"]) {
+                    name
+                    quantity
+                  }
+                  location { id name }
                 }
               }
             }
@@ -118,26 +146,19 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
 
     if (!variant) return { error: "No se encontró el variant en Shopify." };
 
-    const levels = (variant.inventoryLevels?.edges ?? []).map(
+    const levels = (variant.inventoryItem?.inventoryLevels?.edges ?? []).map(
       (edge: {
         node: {
-          location: { id: string; name: string };
           quantities: Array<{ name: string; quantity: number }>;
+          location: { id: string; name: string };
         };
-      }) => {
-        const locationNumericId = Number(
+      }) => ({
+        shopify_location_id: Number(
           edge.node.location.id.replace("gid://shopify/Location/", ""),
-        );
-        const available =
-          edge.node.quantities.find(
-            (q: { name: string; quantity: number }) => q.name === "available",
-          )?.quantity ?? 0;
-        return {
-          shopify_location_id: locationNumericId,
-          location_name: edge.node.location.name,
-          quantity: available,
-        };
-      },
+        ),
+        location_name: edge.node.location.name,
+        quantity: edge.node.quantities.find((q) => q.name === "available")?.quantity ?? 0,
+      }),
     );
 
     const costRaw = variant.inventoryItem?.unitCost?.amount;
@@ -187,7 +208,7 @@ function formatDate(iso: string | null) {
 // ── UI ───────────────────────────────────────────────────────────────────────
 
 export default function SkuDetail() {
-  const { sku, analytics, inventoryLevels, score, criteria } =
+  const { sku, analytics, inventoryLevels, score, criteria, barcodeDataUrl } =
     useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
@@ -199,13 +220,21 @@ export default function SkuDetail() {
   const isSyncing =
     navigation.state === "submitting" &&
     navigation.formData?.get("intent") === "sync";
+  const isGenerating =
+    navigation.state === "submitting" &&
+    navigation.formData?.get("intent") === "generate_barcode";
 
   const successMsg = actionData && "success" in actionData ? actionData.success : null;
   const errorMsg   = actionData && "error"   in actionData ? actionData.error   : null;
 
+  // Prefer freshly-generated image (action), fall back to loader's render
+  const effectiveBarcodeUrl =
+    (actionData && "barcodeDataUrl" in actionData ? actionData.barcodeDataUrl : null)
+    ?? barcodeDataUrl;
+
   return (
     <s-page heading={sku.sku_code}>
-      {/* ── Aside: health score + actions ── */}
+      {/* ── Aside: health score ── */}
       <s-section slot="aside" heading="Health Score">
         <s-stack direction="block" gap="base">
           <s-stack direction="inline" gap="small">
@@ -269,12 +298,8 @@ export default function SkuDetail() {
       </s-section>
 
       {/* ── Main: feedback ── */}
-      {successMsg && (
-        <s-banner tone="success" heading={successMsg} />
-      )}
-      {errorMsg && (
-        <s-banner tone="critical" heading={errorMsg} />
-      )}
+      {successMsg && <s-banner tone="success" heading={successMsg} />}
+      {errorMsg   && <s-banner tone="critical" heading={errorMsg} />}
 
       {/* ── Main: editable info ── */}
       <s-section heading="Información del SKU">
@@ -296,8 +321,8 @@ export default function SkuDetail() {
             <s-select name="barcode_type" label="Tipo de barcode" value={sku.barcode_type ?? "CODE128"}>
               <s-option value="CODE128">CODE128</s-option>
               <s-option value="EAN13">EAN-13</s-option>
+              <s-option value="EAN8">EAN-8</s-option>
               <s-option value="QR">QR</s-option>
-              <s-option value="UPC">UPC</s-option>
             </s-select>
             <s-text-field
               name="vendor"
@@ -311,14 +336,65 @@ export default function SkuDetail() {
               min={0}
               step={0.01}
             />
-            <s-button
-              type="submit"
-              {...(isSaving ? { loading: true } : {})}
-            >
+            <s-button type="submit" {...(isSaving ? { loading: true } : {})}>
               Guardar cambios
             </s-button>
           </s-stack>
         </Form>
+      </s-section>
+
+      {/* ── Main: barcode ── */}
+      <s-section heading="Barcode">
+        {effectiveBarcodeUrl ? (
+          <s-stack direction="block" gap="base">
+            <img
+              src={effectiveBarcodeUrl}
+              alt={`Barcode ${sku.barcode}`}
+              style={{ maxWidth: "320px", display: "block", background: "#fff", padding: "12px" }}
+            />
+            <s-text>{sku.barcode} · {sku.barcode_type ?? "CODE128"}</s-text>
+            <s-button
+              variant="secondary"
+              onClick={() => {
+                const win = window.open("", "_blank");
+                if (win) {
+                  win.document.write(
+                    `<img src="${effectiveBarcodeUrl}" style="max-width:100%;padding:24px" />`,
+                  );
+                  win.document.title = `Barcode ${sku.barcode}`;
+                  win.print();
+                }
+              }}
+            >
+              Imprimir
+            </s-button>
+          </s-stack>
+        ) : (
+          <Form method="post">
+            <input type="hidden" name="intent" value="generate_barcode" />
+            <s-stack direction="block" gap="base">
+              <s-text-field
+                name="barcode_code"
+                label="Código del barcode"
+                value={sku.sku_code}
+                placeholder="Ej. 5901234123457"
+                help-text="Ingresa el código que quieres codificar"
+              />
+              <s-select name="barcode_type" label="Formato" value="CODE128">
+                <s-option value="CODE128">CODE128 (uso general)</s-option>
+                <s-option value="EAN13">EAN-13 (retail, 13 dígitos)</s-option>
+                <s-option value="EAN8">EAN-8 (retail compacto, 8 dígitos)</s-option>
+                <s-option value="QR">QR Code</s-option>
+              </s-select>
+              <s-button
+                type="submit"
+                {...(isGenerating ? { loading: true } : {})}
+              >
+                Generar barcode
+              </s-button>
+            </s-stack>
+          </Form>
+        )}
       </s-section>
 
       {/* ── Main: ventas ── */}
@@ -359,9 +435,7 @@ export default function SkuDetail() {
                     {level.location_name ?? `Location ${level.shopify_location_id}`}
                   </s-table-cell>
                   <s-table-cell>
-                    <s-badge
-                      tone={level.quantity > 0 ? "success" : "critical"}
-                    >
+                    <s-badge tone={level.quantity > 0 ? "success" : "critical"}>
                       {level.quantity}
                     </s-badge>
                   </s-table-cell>

@@ -227,6 +227,7 @@ export type Database = {
           plan: string | null
           settings: Json | null
           shop_id: string
+          sku_limit: number | null
           uninstalled_at: string | null
         }
         Insert: {
@@ -236,6 +237,7 @@ export type Database = {
           plan?: string | null
           settings?: Json | null
           shop_id: string
+          sku_limit?: number | null
           uninstalled_at?: string | null
         }
         Update: {
@@ -245,6 +247,7 @@ export type Database = {
           plan?: string | null
           settings?: Json | null
           shop_id?: string
+          sku_limit?: number | null
           uninstalled_at?: string | null
         }
         Relationships: []

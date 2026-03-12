@@ -5,22 +5,6 @@ create extension if not exists "uuid-ossp";
 create extension if not exists "pg_trgm"; -- Búsqueda fuzzy de SKU codes
 
 -- ============================================
--- SHOPS
--- ============================================
-create table shops (
-  id uuid primary key default gen_random_uuid(),
-  shop_id text not null unique,         -- 'mi-tienda.myshopify.com'
-  plan text default 'trial',            -- trial | starter | growth | pro
-  is_active boolean default true,
-  installed_at timestamptz default now(),
-  uninstalled_at timestamptz,
-  settings jsonb default '{}'::jsonb
-);
-
-alter table shops enable row level security;
--- Sin policies públicas = solo service_role puede acceder
-
--- ============================================
 -- SKUs
 -- ============================================
 create table skus (

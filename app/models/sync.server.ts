@@ -7,15 +7,6 @@ export async function refreshSkuAnalytics() {
   if (error) console.error("[refreshSkuAnalytics]", error.message);
 }
 
-// ── Shop bootstrapping ────────────────────────────────────────────────────────
-
-export async function ensureShopExists(shopId: string) {
-  const { error } = await supabaseAdmin
-    .from("shops")
-    .upsert({ shop_id: shopId }, { onConflict: "shop_id", ignoreDuplicates: true });
-  if (error) console.error("ensureShopExists:", error.message);
-}
-
 // ── Active job ────────────────────────────────────────────────────────────────
 
 export async function getActiveSyncJob(shopId: string) {

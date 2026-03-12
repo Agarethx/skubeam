@@ -7,6 +7,7 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { supabaseAdmin } from "./db.server";
 import { SupabaseSessionStorage } from "./lib/supabase-session-storage.server";
+import { upsertShop } from "./models/shop.server";
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
@@ -44,7 +45,10 @@ const shopify = shopifyApp({
   },
   hooks: {
     afterAuth: async ({ session }) => {
-      shopify.registerWebhooks({ session });
+      await Promise.all([
+        shopify.registerWebhooks({ session }),
+        upsertShop(session.shop),
+      ]);
     },
   },
   ...(process.env.SHOP_CUSTOM_DOMAIN

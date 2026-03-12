@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@bwip-js/node':
+        specifier: ^4.8.0
+        version: 4.8.0
       '@react-router/dev':
         specifier: ^7.12.0
         version: 7.13.1(@react-router/serve@7.13.1(react-router@7.13.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(typescript@5.9.3))(@types/node@22.19.15)(jiti@2.6.1)(react-router@7.13.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(typescript@5.9.3)(vite@6.4.1(@types/node@22.19.15)(jiti@2.6.1)(yaml@2.8.2))(yaml@2.8.2)
@@ -245,6 +248,9 @@ packages:
   '@babel/types@7.29.0':
     resolution: {integrity: sha512-LwdZHpScM4Qz8Xw2iKSzS+cfglZzJGvofQICy7W7v4caru4EaAmyUuO6BGrbyQ2mYV11W0U8j5mBhd14dd3B0A==}
     engines: {node: '>=6.9.0'}
+
+  '@bwip-js/node@4.8.0':
+    resolution: {integrity: sha512-1AWSGZelWD44/kuL7n4QkH60OsjYE57+gT2dGzrmmse1auqOiVG/hbBpNvtTakPb2uzBjVmRbbNOWeYs5cDqPA==}
 
   '@emnapi/core@1.8.1':
     resolution: {integrity: sha512-AvT9QFpxK0Zd8J0jopedNm+w/2fIzvtPKPjqyw9jwvBaReTTqPBk9Hixaz7KbjimP+QNz605/XnjFcDAL2pqBg==}
@@ -3758,6 +3764,8 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 7.27.1
       '@babel/helper-validator-identifier': 7.28.5
+
+  '@bwip-js/node@4.8.0': {}
 
   '@emnapi/core@1.8.1':
     dependencies:

@@ -5,11 +5,11 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
-import { ensureShopExists } from "../models/sync.server";
+import { upsertShop } from "../models/shop.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
-  await ensureShopExists(session.shop);
+  await upsertShop(session.shop);
   return { apiKey: process.env.SHOPIFY_API_KEY || "" };
 };
 
