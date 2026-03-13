@@ -41,7 +41,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const intent   = formData.get("intent") as string;
 
-  // ── Save token ──────────────────────────────────────────────────────────────
   if (intent === "save_token") {
     const token = (formData.get("bsale_token") as string).trim();
     if (!token) return { error: "El token no puede estar vacío." };
@@ -55,7 +54,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { success: "Token guardado correctamente." };
   }
 
-  // ── Verify token exists before creating job ─────────────────────────────────
   const { data: shop } = await supabaseAdmin
     .from("shops")
     .select("bsale_token")
@@ -66,7 +64,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { error: "Configura el access token de Bsale antes de sincronizar." };
   }
 
-  // ── Create job and return jobId immediately ─────────────────────────────────
   if (intent === "sync_products") {
     const job = await createBsaleJob(shopId, "bsale_products");
     return { jobId: job.id, jobType: "bsale_products" as const };
@@ -96,6 +93,17 @@ function jobTypeLabel(type: string | null | undefined) {
   return "datos";
 }
 
+const INPUT_STYLE: React.CSSProperties = {
+  width: "100%",
+  padding: "8px 12px",
+  fontSize: "var(--p-font-size-350, 0.875rem)",
+  border: "1px solid var(--p-color-border, #e1e3e5)",
+  borderRadius: "var(--p-border-radius-200, 8px)",
+  background: "var(--p-color-bg-surface, #fff)",
+  color: "var(--p-color-text, inherit)",
+  boxSizing: "border-box",
+};
+
 // ── UI ────────────────────────────────────────────────────────────────────────
 
 export default function BsaleIntegrationPage() {
@@ -104,19 +112,14 @@ export default function BsaleIntegrationPage() {
   const revalidator = useRevalidator();
   const navigate    = useSkuBeamNavigate();
 
-  // Creates the job record — returns { jobId, jobType } immediately
   const createFetcher = useFetcher<{
     jobId?:   string;
     jobType?: "bsale_products" | "bsale_stock";
     error?:   string;
     success?: string;
   }>();
-
-  // Triggers the actual background processing via /api/bsale/sync
   const triggerFetcher = useFetcher();
-
-  // Polls /api/sync/status (unauthenticated — no ?shop=&host= needed)
-  const statusFetcher = useFetcher<{
+  const statusFetcher  = useFetcher<{
     status:            string | null;
     records_processed: number;
     type:              string | null;
@@ -125,14 +128,11 @@ export default function BsaleIntegrationPage() {
   const pollRef         = useRef<ReturnType<typeof setInterval> | null>(null);
   const triggeredJobRef = useRef<string | null>(null);
 
-  // Resolve the active jobId: fresh from action, or from loader (page reload)
   const pendingJobId = createFetcher.data?.jobId ?? null;
   const jobId        = pendingJobId ?? activeJob?.id ?? null;
   const polledStatus = statusFetcher.data?.status;
-  const isRunning    =
-    !!jobId && polledStatus !== "completed" && polledStatus !== "failed";
+  const isRunning    = !!jobId && polledStatus !== "completed" && polledStatus !== "failed";
 
-  // When a new job is created, trigger the actual processing once
   useEffect(() => {
     if (!pendingJobId || triggeredJobRef.current === pendingJobId) return;
     triggeredJobRef.current = pendingJobId;
@@ -142,20 +142,14 @@ export default function BsaleIntegrationPage() {
     );
   }, [pendingJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll while a job is active
   useEffect(() => {
     if (!jobId) return;
-
     pollRef.current = setInterval(() => {
       statusFetcher.load(`/api/sync/status?jobId=${jobId}`);
     }, 3000);
-
-    return () => {
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-    };
+    return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
   }, [jobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // When job finishes, stop polling and reload loader data
   useEffect(() => {
     if (polledStatus === "completed" || polledStatus === "failed") {
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -178,131 +172,194 @@ export default function BsaleIntegrationPage() {
       ? createFetcher.data.success
       : null;
 
-  const progressLabel = statusFetcher.data?.records_processed
+  const progressLabel  = statusFetcher.data?.records_processed
     ? ` — ${statusFetcher.data.records_processed} registros`
     : "";
   const runningType = statusFetcher.data?.type ?? activeJob?.type ?? null;
 
   return (
     <s-page heading="Integración Bsale">
-      {/* ── Aside: status ── */}
-      <s-section slot="aside" heading="Estado">
-        <s-stack direction="block" gap="base">
-          <s-badge tone={hasToken ? "success" : "warning"}>
-            {hasToken ? "Token configurado" : "Sin token"}
-          </s-badge>
-          <s-text>
-            Última sincronización: {formatDate(bsaleLastSync)}
-          </s-text>
-          <s-text>
-            La autenticación Bsale se hace por header{" "}
-            <code>access_token</code> en cada request. Obtén tu token desde
-            el panel de Bsale → Configuración → API.
-          </s-text>
-        </s-stack>
+
+      {/* Back */}
+      <s-section>
+        <s-button variant="tertiary" onClick={() => navigate("/app/integrations")}>
+          ← Volver a Integraciones
+        </s-button>
       </s-section>
 
-      {/* ── Main: feedback ── */}
+      {/* Feedback banners */}
       {successMsg && <s-banner tone="success" heading={successMsg} />}
       {errorMsg   && <s-banner tone="critical" heading={errorMsg} />}
 
-      {/* ── Main: token config ── */}
-      <s-section heading="Configuración de acceso">
-        <Form method="post">
-          <input type="hidden" name="intent" value="save_token" />
-          <s-stack direction="block" gap="base">
-            <s-text-field
-              name="bsale_token"
-              label="Access Token de Bsale"
-              placeholder={hasToken ? "••••••••••••••••••••" : "Pega aquí tu access token"}
-              help-text="El token se guarda de forma segura y nunca se envía al navegador."
-            />
-            <s-button
-              type="submit"
-              variant="secondary"
-              {...(isSavingToken ? { loading: true } : {})}
-            >
-              {hasToken ? "Actualizar token" : "Guardar token"}
-            </s-button>
-          </s-stack>
-        </Form>
-      </s-section>
-
-      {/* ── Main: sync actions ── */}
-      <s-section heading="Sincronización">
-        <s-stack direction="block" gap="base">
-          {!hasToken && (
-            <s-banner
-              tone="warning"
-              heading="Configura el access token antes de sincronizar."
-            />
-          )}
-
-          {/* Running job progress */}
-          {isRunning && (
-            <s-banner tone="info">
-              <s-stack direction="inline" gap="small">
-                <s-spinner />
-                <s-text>
-                  Sincronizando {jobTypeLabel(runningType)}{progressLabel}…
-                </s-text>
-              </s-stack>
-            </s-banner>
-          )}
-
-          {/* Products */}
-          <s-stack direction="block" gap="small">
-            <s-heading>Productos</s-heading>
-            <s-text>
-              Importa el catálogo completo de variantes desde Bsale. Crea o
-              actualiza SKUs por código. Respeta el costo promedio
-              (averageCost) de cada variante.
-            </s-text>
-            <s-stack direction="inline" gap="small">
-              <createFetcher.Form method="post">
-                <input type="hidden" name="intent" value="sync_products" />
-                <s-button
-                  type="submit"
-                  {...(isRunning || createFetcher.state !== "idle" ? { loading: true } : {})}
-                  {...(!hasToken ? { disabled: true } : {})}
-                >
-                  Sincronizar productos desde Bsale
-                </s-button>
-              </createFetcher.Form>
-              {hasToken && !isRunning && (
-                <s-button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => navigate("/app/integrations/bsale/diff")}
-                >
-                  Revisar y publicar en Shopify →
-                </s-button>
-              )}
+      {/* ── Status strip ── */}
+      <s-section>
+        <s-grid gridTemplateColumns="repeat(auto-fit, minmax(180px, 1fr))" gap="base">
+          <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+            <s-stack direction="block" gap="small">
+              <s-text color="subdued">Estado de conexión</s-text>
+              <s-badge tone={hasToken ? "success" : "warning"}>
+                {hasToken ? "Token configurado ✓" : "Sin token"}
+              </s-badge>
             </s-stack>
-          </s-stack>
-
-          {/* Stock */}
-          <s-stack direction="block" gap="small">
-            <s-heading>Stock</s-heading>
-            <s-text>
-              Actualiza los niveles de inventario por oficina Bsale. Requiere
-              que los productos ya estén sincronizados (los SKUs deben existir
-              en SkuBeam).
-            </s-text>
-            <createFetcher.Form method="post">
-              <input type="hidden" name="intent" value="sync_stock" />
-              <s-button
-                type="submit"
-                variant="secondary"
-                {...(isRunning || createFetcher.state !== "idle" ? { loading: true } : {})}
-                {...(!hasToken ? { disabled: true } : {})}
+          </s-box>
+          <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+            <s-stack direction="block" gap="small">
+              <s-text color="subdued">Última sincronización</s-text>
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: "var(--p-font-size-350, 0.875rem)",
+                  fontWeight: "var(--p-font-weight-semibold, 600)" as React.CSSProperties["fontWeight"],
+                  color: "var(--p-color-text, inherit)",
+                }}
               >
-                Sincronizar stock desde Bsale
-              </s-button>
-            </createFetcher.Form>
-          </s-stack>
-        </s-stack>
+                {formatDate(bsaleLastSync)}
+              </p>
+            </s-stack>
+          </s-box>
+          <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+            <s-stack direction="block" gap="small">
+              <s-text color="subdued">Sync bidireccional</s-text>
+              <s-badge tone="info">Tiempo real activo</s-badge>
+            </s-stack>
+          </s-box>
+        </s-grid>
       </s-section>
+
+      {/* ── Config + Sync in two columns ── */}
+      <s-section>
+        <s-grid gridTemplateColumns="1fr 1fr" gap="base">
+
+          {/* Token config */}
+          <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+            <s-stack direction="block" gap="base">
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: "var(--p-font-size-400, 1rem)",
+                  fontWeight: "var(--p-font-weight-bold, 700)" as React.CSSProperties["fontWeight"],
+                }}
+              >
+                Access Token
+              </p>
+              <s-text color="subdued">
+                Obtén tu token en Bsale → Configuración → API. El token se
+                guarda de forma segura y nunca se expone al navegador.
+              </s-text>
+              <Form method="post">
+                <input type="hidden" name="intent" value="save_token" />
+                <s-stack direction="block" gap="small">
+                  <label style={{ display: "block" }}>
+                    <span
+                      style={{
+                        fontSize: "var(--p-font-size-300, 0.75rem)",
+                        fontWeight: 600,
+                        color: "var(--p-color-text-subdued, #6d7175)",
+                        display: "block",
+                        marginBottom: "6px",
+                      }}
+                    >
+                      Access Token de Bsale
+                    </span>
+                    <input
+                      type="password"
+                      name="bsale_token"
+                      placeholder={hasToken ? "••••••••••••••••••••" : "Pega aquí tu access token"}
+                      style={INPUT_STYLE}
+                    />
+                  </label>
+                  <s-button
+                    type="submit"
+                    variant="secondary"
+                    {...(isSavingToken ? { loading: true } : {})}
+                  >
+                    {hasToken ? "Actualizar token" : "Guardar token"}
+                  </s-button>
+                </s-stack>
+              </Form>
+            </s-stack>
+          </s-box>
+
+          {/* Sync actions */}
+          <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+            <s-stack direction="block" gap="base">
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: "var(--p-font-size-400, 1rem)",
+                  fontWeight: "var(--p-font-weight-bold, 700)" as React.CSSProperties["fontWeight"],
+                }}
+              >
+                Sincronización manual
+              </p>
+
+              {!hasToken && (
+                <s-banner tone="warning" heading="Configura el access token antes de sincronizar." />
+              )}
+
+              {isRunning && (
+                <s-banner tone="info">
+                  <s-stack direction="inline" gap="small">
+                    <s-spinner />
+                    <s-text>Sincronizando {jobTypeLabel(runningType)}{progressLabel}…</s-text>
+                  </s-stack>
+                </s-banner>
+              )}
+
+              <s-stack direction="block" gap="small">
+                <s-text type="strong">Productos</s-text>
+                <s-text color="subdued">
+                  Importa el catálogo completo de variantes desde Bsale.
+                  Respeta el costo promedio (averageCost) de cada variante.
+                </s-text>
+                <s-stack direction="inline" gap="small">
+                  <createFetcher.Form method="post">
+                    <input type="hidden" name="intent" value="sync_products" />
+                    <s-button
+                      type="submit"
+                      {...(isRunning || createFetcher.state !== "idle" ? { loading: true } : {})}
+                      {...(!hasToken ? { disabled: true } : {})}
+                    >
+                      Sincronizar productos
+                    </s-button>
+                  </createFetcher.Form>
+                  {hasToken && !isRunning && (
+                    <s-button
+                      variant="secondary"
+                      onClick={() => navigate("/app/integrations/bsale/diff")}
+                    >
+                      Revisar diff →
+                    </s-button>
+                  )}
+                </s-stack>
+              </s-stack>
+
+              <div style={{ height: "1px", background: "var(--p-color-border, #e1e3e5)" }} />
+
+              <s-stack direction="block" gap="small">
+                <s-text type="strong">Stock</s-text>
+                <s-text color="subdued">
+                  Actualiza los niveles de inventario por oficina. Requiere que
+                  los productos ya estén sincronizados.
+                </s-text>
+                <createFetcher.Form method="post">
+                  <input type="hidden" name="intent" value="sync_stock" />
+                  <s-button
+                    type="submit"
+                    variant="secondary"
+                    {...(isRunning || createFetcher.state !== "idle" ? { loading: true } : {})}
+                    {...(!hasToken ? { disabled: true } : {})}
+                  >
+                    Sincronizar stock
+                  </s-button>
+                </createFetcher.Form>
+              </s-stack>
+            </s-stack>
+          </s-box>
+
+        </s-grid>
+      </s-section>
+
     </s-page>
   );
 }

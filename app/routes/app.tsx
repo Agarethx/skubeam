@@ -33,7 +33,7 @@ function AppLayout() {
         <s-link href="/app/skus">SKUs</s-link>
         <s-link href="/app/forecast">Forecast</s-link>
         <s-link href="/app/analytics">Analytics</s-link>
-        <s-link href="/app/integrations/bsale">Integraciones</s-link>
+        <s-link href="/app/integrations">Integraciones</s-link>
         <s-link href="/app/billing">Planes</s-link>
       </s-app-nav>
       <Outlet />
