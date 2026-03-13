@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "../db.server";
 import { PLANS, SKU_LIMITS } from "./plans";
+import type { PlanKey } from "./plans";
 
 // Re-export so existing imports of billing.server keep working
 export { PLANS, SKU_LIMITS } from "./plans";
