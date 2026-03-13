@@ -1,12 +1,37 @@
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData, useRevalidator } from "react-router";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { Form, useFetcher, useLoaderData, useNavigate, useNavigation, useRevalidator } from "react-router";
 import { useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
-import { getForecastForShop, hasSalesData } from "../models/forecast.server";
+import {
+  getForecastForShop,
+  hasSalesData,
+  saveForecastConfig,
+} from "../models/forecast.server";
 import { getActiveSyncJob } from "../models/sync.server";
 import type { ForecastRow } from "../models/forecast.server";
 import { useShopifyParams } from "../lib/navigate";
+
+const PAGE_SIZE = 25;
+const GRID_COLS = "200px 1fr 70px 90px 80px 110px 120px";
+
+// ── Action ───────────────────────────────────────────────────────────────────
+
+export const action = async ({ request }: ActionFunctionArgs) => {
+  const { session } = await authenticate.admin(request);
+  const shopId = session.shop;
+  const formData = await request.formData();
+
+  if (formData.get("intent") === "saveConfig") {
+    await saveForecastConfig(shopId, {
+      reorder_lead_days:   Number(formData.get("lead_days"))   || 14,
+      safety_stock_days:   Number(formData.get("safety_days")) || 7,
+      forecast_window_days: Number(formData.get("window_days")) || 30,
+    });
+  }
+
+  return null;
+};
 
 // ── Loader ───────────────────────────────────────────────────────────────────
 
@@ -14,13 +39,56 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopId = session.shop;
 
-  const [{ rows, config }, salesData, activeJob] = await Promise.all([
+  const url = new URL(request.url);
+  const statusFilter = url.searchParams.get("status") ?? "";
+  const page = Math.max(1, Number(url.searchParams.get("page") ?? "1"));
+
+  const [{ rows: allRows, config }, salesData, activeJob] = await Promise.all([
     getForecastForShop(shopId),
     hasSalesData(shopId),
     getActiveSyncJob(shopId),
   ]);
 
-  return { rows, config, salesData, activeJob };
+  const criticalCount = allRows.filter((r) => r.status === "critical").length;
+  const lowCount      = allRows.filter((r) => r.status === "low").length;
+  const deadCount     = allRows.filter((r) => r.status === "dead").length;
+
+  const atRiskValue = allRows
+    .filter((r) => r.status === "critical" || r.status === "low")
+    .reduce((sum, r) => sum + r.total_stock * (r.cost_price ?? 0), 0);
+
+  const withVelocity = allRows.filter((r) => r.daily_velocity > 0);
+  const avgDaysStock =
+    withVelocity.length > 0
+      ? Math.round(
+          withVelocity.reduce((sum, r) => sum + r.total_stock / r.daily_velocity, 0) /
+            withVelocity.length,
+        )
+      : null;
+
+  const filtered = statusFilter
+    ? allRows.filter((r) => r.status === statusFilter)
+    : allRows;
+
+  const total      = filtered.length;
+  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const rows       = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  return {
+    rows,
+    total,
+    page,
+    totalPages,
+    config,
+    salesData,
+    activeJob,
+    statusFilter,
+    criticalCount,
+    lowCount,
+    deadCount,
+    atRiskValue,
+    avgDaysStock,
+  };
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -47,18 +115,57 @@ function fmt(n: number) {
   return n.toFixed(n % 1 === 0 ? 0 : 2);
 }
 
-// ── UI ───────────────────────────────────────────────────────────────────────
+function fmtUSD(n: number): string {
+  if (n <= 0) return "—";
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000)     return `$${(n / 1_000).toFixed(0)}K`;
+  return `$${n.toFixed(0)}`;
+}
+
+const INPUT_STYLE: React.CSSProperties = {
+  width: "100%",
+  padding: "6px 10px",
+  fontSize: "var(--p-font-size-350, 0.875rem)",
+  border: "1px solid var(--p-color-border, #e1e3e5)",
+  borderRadius: "var(--p-border-radius-200, 8px)",
+  background: "var(--p-color-bg-surface, #fff)",
+  color: "var(--p-color-text, inherit)",
+  boxSizing: "border-box",
+};
+
+const LABEL_STYLE: React.CSSProperties = {
+  fontSize: "var(--p-font-size-300, 0.75rem)",
+  color: "var(--p-color-text-subdued, #6d7175)",
+  display: "block",
+  marginBottom: "4px",
+};
+
+// ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function ForecastPage() {
-  const { rows, config, salesData, activeJob } =
-    useLoaderData<typeof loader>();
+  const {
+    rows,
+    total,
+    page,
+    totalPages,
+    config,
+    salesData,
+    activeJob,
+    statusFilter,
+    criticalCount,
+    lowCount,
+    deadCount,
+    atRiskValue,
+    avgDaysStock,
+  } = useLoaderData<typeof loader>();
 
-  // Starts the orders sync job
+  const navigate    = useNavigate();
+  const navigation  = useNavigation();
+  const shopifyParams = useShopifyParams();
+
   const startFetcher = useFetcher<{
     job: { id: string; status: string; type: string };
   }>();
-
-  // Polls /api/sync/status (no auth required — no ?shop=&host= needed)
   const statusFetcher = useFetcher<{
     status: string | null;
     records_processed: number;
@@ -66,9 +173,7 @@ export default function ForecastPage() {
 
   const revalidator = useRevalidator();
   const pollRef     = useRef<ReturnType<typeof setInterval> | null>(null);
-  const shopifyParams = useShopifyParams();
 
-  // Resolve the job ID: prefer a freshly-started job, fall back to loader
   const jobId =
     (startFetcher.data?.job?.type === "orders_sync"
       ? startFetcher.data.job.id
@@ -76,86 +181,203 @@ export default function ForecastPage() {
 
   const polledStatus = statusFetcher.data?.status;
   const isRunning =
-    !!jobId &&
-    polledStatus !== "completed" &&
-    polledStatus !== "failed";
+    !!jobId && polledStatus !== "completed" && polledStatus !== "failed";
 
-  // Start polling when we have a jobId
   useEffect(() => {
     if (!jobId) return;
-
     pollRef.current = setInterval(() => {
       statusFetcher.load(`/api/sync/status?jobId=${jobId}`);
     }, 3000);
-
     return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     };
   }, [jobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // When job finishes, stop polling and reload the forecast data
   useEffect(() => {
     if (polledStatus === "completed" || polledStatus === "failed") {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
       revalidator.revalidate();
     }
   }, [polledStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const criticalCount = rows.filter((r) => r.status === "critical").length;
-  const lowCount      = rows.filter((r) => r.status === "low").length;
-  const deadCount     = rows.filter((r) => r.status === "dead").length;
   const hasReplenishmentItems = criticalCount + lowCount > 0;
+  const isLoading = navigation.state === "loading";
+
+  function pageUrl(newPage: number): string {
+    const p = new URLSearchParams();
+    if (statusFilter) p.set("status", statusFilter);
+    if (newPage > 1) p.set("page", String(newPage));
+    return `?${p.toString()}`;
+  }
+
+  function filterUrl(s: string): string {
+    return statusFilter === s ? "?" : `?status=${s}`;
+  }
+
+  function handleGeneratePO() {
+    fetch(`/api/po/generate${shopifyParams}`, { method: "POST" })
+      .then((res) => {
+        if (!res.ok) throw new Error(`${res.status}`);
+        return res.blob();
+      })
+      .then((blob) => {
+        const today = new Date().toISOString().slice(0, 10);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `purchase-order-${today}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      })
+      .catch((err) => console.error("[PO generate]", err));
+  }
+
+  const filterBannerLabel: Record<string, string> = {
+    critical: "críticos",
+    low:      "bajos (bajo reorden)",
+    dead:     "sin rotación",
+  };
+
+  const BADGE_BTN: React.CSSProperties = {
+    background: "none",
+    border: "none",
+    padding: 0,
+    cursor: "pointer",
+  };
 
   return (
     <s-page heading="Forecast & Reposición">
-      {/* ── Aside: summary ── */}
+
+      {/* ── Aside 1: Resumen ── */}
       <s-section slot="aside" heading="Resumen">
         <s-stack direction="block" gap="base">
-          <s-stack direction="inline" gap="small">
-            <s-badge tone="critical">{criticalCount} críticos</s-badge>
-            <s-badge tone="caution">{lowCount} bajos</s-badge>
-            <s-badge tone="warning">{deadCount} sin rotación</s-badge>
+
+          {/* Clickable status badges */}
+          <s-stack direction="block" gap="small">
+            <s-text color="subdued">Filtrar por estado</s-text>
+            <s-stack direction="inline" gap="small">
+              <button
+                onClick={() => navigate(filterUrl("critical"))}
+                style={{ ...BADGE_BTN, opacity: statusFilter && statusFilter !== "critical" ? 0.4 : 1 }}
+              >
+                <s-badge tone="critical">{criticalCount} críticos</s-badge>
+              </button>
+              <button
+                onClick={() => navigate(filterUrl("low"))}
+                style={{ ...BADGE_BTN, opacity: statusFilter && statusFilter !== "low" ? 0.4 : 1 }}
+              >
+                <s-badge tone="caution">{lowCount} bajos</s-badge>
+              </button>
+              <button
+                onClick={() => navigate(filterUrl("dead"))}
+                style={{ ...BADGE_BTN, opacity: statusFilter && statusFilter !== "dead" ? 0.4 : 1 }}
+              >
+                <s-badge tone="warning">{deadCount} sin rotación</s-badge>
+              </button>
+            </s-stack>
           </s-stack>
-          <s-text>
-            Config: lead {config.reorder_lead_days}d · safety{" "}
-            {config.safety_stock_days}d · ventana {config.forecast_window_days}d
-          </s-text>
+
+          {/* Valor en riesgo */}
+          <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+            <s-stack direction="block" gap="small">
+              <s-text color="subdued">Valor en riesgo</s-text>
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: "var(--p-font-size-600, 1.25rem)",
+                  fontWeight: "var(--p-font-weight-bold, 700)" as React.CSSProperties["fontWeight"],
+                  color: hasReplenishmentItems
+                    ? "var(--p-color-text-critical, #D82C0D)"
+                    : "var(--p-color-text, inherit)",
+                }}
+              >
+                {fmtUSD(atRiskValue)}
+              </p>
+              <s-text color="subdued">SKUs críticos + bajos × costo</s-text>
+            </s-stack>
+          </s-box>
+
+          {/* Días promedio de stock */}
+          <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+            <s-stack direction="block" gap="small">
+              <s-text color="subdued">Días promedio de stock</s-text>
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: "var(--p-font-size-600, 1.25rem)",
+                  fontWeight: "var(--p-font-weight-bold, 700)" as React.CSSProperties["fontWeight"],
+                  color: "var(--p-color-text, inherit)",
+                }}
+              >
+                {avgDaysStock != null ? `${avgDaysStock}d` : "—"}
+              </p>
+              <s-text color="subdued">Promedio SKUs activos c/ventas</s-text>
+            </s-stack>
+          </s-box>
+
+          {/* PO button — only when there are items to replenish */}
           {hasReplenishmentItems && (
-            <s-button
-              variant="primary"
-              onClick={() => {
-                fetch(`/api/po/generate${shopifyParams}`, { method: "POST" })
-                  .then((res) => {
-                    if (!res.ok) throw new Error(`PO generation failed: ${res.status}`);
-                    return res.blob();
-                  })
-                  .then((blob) => {
-                    const today = new Date().toISOString().slice(0, 10);
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = `purchase-order-${today}.pdf`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                  })
-                  .catch((err) => console.error("[PO generate]", err));
+            <div
+              style={{
+                background: "var(--p-color-bg-fill-critical, #D82C0D)",
+                borderRadius: "var(--p-border-radius-200, 8px)",
+                padding: "1px",
               }}
             >
-              Generar Orden de Compra
-            </s-button>
+              <s-button variant="primary" onClick={handleGeneratePO}>
+                Generar Orden de Compra
+              </s-button>
+            </div>
           )}
         </s-stack>
       </s-section>
 
-      {/* ── Aside: import orders ── */}
+      {/* ── Aside 2: Config ── */}
+      <s-section slot="aside" heading="Configuración">
+        <Form method="post">
+          <input type="hidden" name="intent" value="saveConfig" />
+          <s-stack direction="block" gap="small">
+            <label style={{ display: "block" }}>
+              <span style={LABEL_STYLE}>Lead time (días)</span>
+              <input
+                type="number"
+                name="lead_days"
+                defaultValue={config.reorder_lead_days}
+                min={1}
+                max={365}
+                style={INPUT_STYLE}
+              />
+            </label>
+            <label style={{ display: "block" }}>
+              <span style={LABEL_STYLE}>Safety stock (días)</span>
+              <input
+                type="number"
+                name="safety_days"
+                defaultValue={config.safety_stock_days}
+                min={0}
+                max={90}
+                style={INPUT_STYLE}
+              />
+            </label>
+            <label style={{ display: "block" }}>
+              <span style={LABEL_STYLE}>Ventana forecast (días)</span>
+              <input
+                type="number"
+                name="window_days"
+                defaultValue={config.forecast_window_days}
+                min={7}
+                max={365}
+                style={INPUT_STYLE}
+              />
+            </label>
+            <s-button type="submit" variant="secondary">Guardar config</s-button>
+          </s-stack>
+        </Form>
+      </s-section>
+
+      {/* ── Aside 3: Import orders ── */}
       <s-section slot="aside" heading="Historial de ventas">
         {isRunning ? (
           <s-stack direction="block" gap="small">
@@ -177,7 +399,6 @@ export default function ForecastPage() {
                 reorder points.
               </s-text>
             )}
-
             <startFetcher.Form method="post" action="/api/sync">
               <input type="hidden" name="type" value="orders" />
               <s-button
@@ -188,7 +409,6 @@ export default function ForecastPage() {
                 {salesData ? "Re-importar historial" : "Importar historial de ventas"}
               </s-button>
             </startFetcher.Form>
-
             {polledStatus === "failed" && (
               <s-banner
                 tone="critical"
@@ -200,54 +420,151 @@ export default function ForecastPage() {
       </s-section>
 
       {/* ── Main: forecast table ── */}
-      <s-section heading={`Forecast por SKU (${rows.length} activos)`}>
-        {rows.length === 0 ? (
-          <s-paragraph>No hay SKUs activos.</s-paragraph>
+      <s-section heading={`Forecast (${total} SKU${total !== 1 ? "s" : ""})`}>
+
+        {/* Active filter banner */}
+        {statusFilter && filterBannerLabel[statusFilter] && (
+          <s-banner
+            tone="info"
+            heading={`Mostrando solo SKUs ${filterBannerLabel[statusFilter]}`}
+          >
+            <s-button variant="tertiary" onClick={() => navigate("?")}>
+              Limpiar filtro ×
+            </s-button>
+          </s-banner>
+        )}
+
+        {total === 0 ? (
+          <s-paragraph>
+            {statusFilter
+              ? "No hay SKUs con ese estado."
+              : "No hay SKUs activos."}
+          </s-paragraph>
         ) : (
-          <s-table>
-            <s-table-header>
-              <s-table-header-row>
-                <s-table-cell>SKU</s-table-cell>
-                <s-table-cell>Título</s-table-cell>
-                <s-table-cell>Stock</s-table-cell>
-                <s-table-cell>Vel. diaria</s-table-cell>
-                <s-table-cell>Reorder point</s-table-cell>
-                <s-table-cell>Días restantes</s-table-cell>
-                <s-table-cell>Estado</s-table-cell>
-              </s-table-header-row>
-            </s-table-header>
-            <s-table-body>
-              {rows.map((row) => (
-                <s-table-row key={row.id}>
-                  <s-table-cell>
-                    <s-text>{row.sku_code}</s-text>
-                  </s-table-cell>
-                  <s-table-cell>
-                    <s-text>{row.title ?? "—"}</s-text>
-                  </s-table-cell>
-                  <s-table-cell>
+          <s-stack direction="block" gap="base">
+            {/* Grid table */}
+            <div
+              style={{
+                border: "1px solid var(--p-color-border, #e1e3e5)",
+                borderRadius: "var(--p-border-radius-200, 8px)",
+                overflow: "hidden",
+                opacity: isLoading ? 0.6 : 1,
+                transition: "opacity 0.15s",
+              }}
+            >
+              {/* Header row */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: GRID_COLS,
+                  padding: "8px 16px",
+                  background: "var(--p-color-bg-surface-secondary, #f6f6f7)",
+                  borderBottom: "1px solid var(--p-color-border, #e1e3e5)",
+                }}
+              >
+                {(["SKU", "Producto", "Stock", "Velocidad", "Reorden", "Días restantes", "Estado"] as const).map(
+                  (label, i) => (
+                    <span
+                      key={i}
+                      style={{
+                        fontSize: "var(--p-font-size-300, 0.75rem)",
+                        fontWeight: 600,
+                        color: "var(--p-color-text-subdued, #6d7175)",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.04em",
+                      }}
+                    >
+                      {label}
+                    </span>
+                  ),
+                )}
+              </div>
+
+              {/* Data rows */}
+              {rows.map((row, idx) => (
+                <div
+                  key={row.id}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: GRID_COLS,
+                    padding: "12px 16px",
+                    alignItems: "center",
+                    background:
+                      idx % 2 === 0
+                        ? "var(--p-color-bg-surface, #ffffff)"
+                        : "var(--p-color-bg-surface-secondary, #f6f6f7)",
+                    borderBottom:
+                      idx < rows.length - 1
+                        ? "1px solid var(--p-color-border-subdued, #e1e3e5)"
+                        : "none",
+                  }}
+                >
+                  <span style={{ fontWeight: 600, fontSize: "var(--p-font-size-350, 0.875rem)" }}>
+                    {row.sku_code}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: "var(--p-font-size-350, 0.875rem)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {row.title ?? "—"}
+                  </span>
+                  <span>
                     <s-badge tone={row.total_stock > 0 ? "success" : "critical"}>
                       {row.total_stock}
                     </s-badge>
-                  </s-table-cell>
-                  <s-table-cell>
+                  </span>
+                  <span style={{ fontSize: "var(--p-font-size-350, 0.875rem)" }}>
                     {row.daily_velocity > 0 ? fmt(row.daily_velocity) : "—"}
-                  </s-table-cell>
-                  <s-table-cell>
+                  </span>
+                  <span style={{ fontSize: "var(--p-font-size-350, 0.875rem)" }}>
                     {row.daily_velocity > 0 ? row.reorder_point : "—"}
-                  </s-table-cell>
-                  <s-table-cell>
+                  </span>
+                  <span style={{ fontSize: "var(--p-font-size-350, 0.875rem)" }}>
                     {row.days_left !== null ? `${row.days_left}d` : "—"}
-                  </s-table-cell>
-                  <s-table-cell>
+                  </span>
+                  <span>
                     <s-badge tone={statusTone(row.status)}>
                       {statusLabel(row.status)}
                     </s-badge>
-                  </s-table-cell>
-                </s-table-row>
+                  </span>
+                </div>
               ))}
-            </s-table-body>
-          </s-table>
+            </div>
+
+            {/* Pagination */}
+            <s-stack
+              direction="inline"
+              justifyContent="space-between"
+              alignItems="center"
+            >
+              <s-text color="subdued">
+                Página {page} de {totalPages} · {total} SKU
+                {total !== 1 ? "s" : ""}
+              </s-text>
+              {totalPages > 1 && (
+                <s-stack direction="inline" gap="small">
+                  <s-button
+                    variant="tertiary"
+                    {...(page <= 1 ? { disabled: true } : {})}
+                    onClick={() => navigate(pageUrl(page - 1))}
+                  >
+                    ← Anterior
+                  </s-button>
+                  <s-button
+                    variant="tertiary"
+                    {...(page >= totalPages ? { disabled: true } : {})}
+                    onClick={() => navigate(pageUrl(page + 1))}
+                  >
+                    Siguiente →
+                  </s-button>
+                </s-stack>
+              )}
+            </s-stack>
+          </s-stack>
         )}
       </s-section>
     </s-page>

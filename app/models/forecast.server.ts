@@ -18,6 +18,7 @@ export interface ForecastRow {
   reorder_point: number;
   days_left: number | null;
   status: "critical" | "low" | "ok" | "dead";
+  cost_price: number | null;
 }
 
 const DEFAULT_CONFIG: ForecastConfig = {
@@ -39,6 +40,16 @@ export async function getForecastConfig(shopId: string): Promise<ForecastConfig>
   return data ?? DEFAULT_CONFIG;
 }
 
+export async function saveForecastConfig(
+  shopId: string,
+  fields: Pick<ForecastConfig, "reorder_lead_days" | "safety_stock_days" | "forecast_window_days">,
+): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("forecast_configs")
+    .upsert({ shop_id: shopId, ...fields }, { onConflict: "shop_id" });
+  if (error) throw new Error(`saveForecastConfig: ${error.message}`);
+}
+
 // ── Forecast table ────────────────────────────────────────────────────────────
 
 export async function getForecastForShop(shopId: string) {
@@ -46,7 +57,7 @@ export async function getForecastForShop(shopId: string) {
 
   const { data: analytics, error } = await supabaseAdmin
     .from("sku_analytics")
-    .select("id, sku_code, title, total_stock, sold_30d, sold_90d")
+    .select("id, sku_code, title, total_stock, sold_30d, sold_90d, cost_price")
     .eq("shop_id", shopId)
     .eq("status", "active")
     .order("sku_code");
@@ -85,6 +96,7 @@ export async function getForecastForShop(shopId: string) {
       daily_velocity: dailyVelocity,
       reorder_point:  reorderPoint,
       days_left:      daysLeft,
+      cost_price:     sku.cost_price != null ? Number(sku.cost_price) : null,
       status,
     };
   });

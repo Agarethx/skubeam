@@ -4,6 +4,7 @@ import type {
   LoaderFunctionArgs,
 } from "react-router";
 import {
+  Form,
   useLoaderData,
   useNavigate,
   useNavigation,
@@ -139,7 +140,7 @@ export default function SkusIndex() {
     (activeSyncJob.status === "running" || activeSyncJob.status === "pending");
 
   // Build a filtered URL, preserving current search/status params
-  function pageUrl(newPage: number, s = search, st = status): string {
+  function pageUrl(newPage: number, s = search, st: string = status): string {
     const p = new URLSearchParams();
     if (s) p.set("search", s);
     if (st) p.set("status", st);
