@@ -6,6 +6,7 @@ import { authenticate } from "../shopify.server";
 import { getForecastForShop, hasSalesData } from "../models/forecast.server";
 import { getActiveSyncJob } from "../models/sync.server";
 import type { ForecastRow } from "../models/forecast.server";
+import { useShopifyParams } from "../lib/navigate";
 
 // ── Loader ───────────────────────────────────────────────────────────────────
 
@@ -65,6 +66,7 @@ export default function ForecastPage() {
 
   const revalidator = useRevalidator();
   const pollRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const shopifyParams = useShopifyParams();
 
   // Resolve the job ID: prefer a freshly-started job, fall back to loader
   const jobId =
@@ -108,6 +110,7 @@ export default function ForecastPage() {
   const criticalCount = rows.filter((r) => r.status === "critical").length;
   const lowCount      = rows.filter((r) => r.status === "low").length;
   const deadCount     = rows.filter((r) => r.status === "dead").length;
+  const hasReplenishmentItems = criticalCount + lowCount > 0;
 
   return (
     <s-page heading="Forecast & Reposición">
@@ -123,6 +126,32 @@ export default function ForecastPage() {
             Config: lead {config.reorder_lead_days}d · safety{" "}
             {config.safety_stock_days}d · ventana {config.forecast_window_days}d
           </s-text>
+          {hasReplenishmentItems && (
+            <s-button
+              variant="primary"
+              onClick={() => {
+                fetch(`/api/po/generate${shopifyParams}`, { method: "POST" })
+                  .then((res) => {
+                    if (!res.ok) throw new Error(`PO generation failed: ${res.status}`);
+                    return res.blob();
+                  })
+                  .then((blob) => {
+                    const today = new Date().toISOString().slice(0, 10);
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `purchase-order-${today}.pdf`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  })
+                  .catch((err) => console.error("[PO generate]", err));
+              }}
+            >
+              Generar Orden de Compra
+            </s-button>
+          )}
         </s-stack>
       </s-section>
 

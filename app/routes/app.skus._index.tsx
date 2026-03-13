@@ -120,6 +120,20 @@ function SyncProgressBanner({ job }: { job: SyncJob }) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
+async function downloadBlob(url: string, filename: string, method = "GET") {
+  const res = await fetch(url, { method });
+  if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(objectUrl);
+}
+
 export default function SkusIndex() {
   const { skus, total, page, totalPages, search, status, activeSyncJob } =
     useLoaderData<typeof loader>();
@@ -144,27 +158,40 @@ export default function SkusIndex() {
       {/* Filters — hidden during initial import */}
       {total > 0 && (
         <s-section>
-          <Form method="get">
-            <s-stack direction="inline" gap="base">
-              <s-search-field
-                name="search"
-                label="Buscar SKU"
-                label-accessibility-visibility="hidden"
-                placeholder="Buscar por código SKU…"
-                value={search}
-              />
-              <s-select name="status" label="Estado" value={status}>
-                <s-option value="">Todos</s-option>
-                <s-option value="active">Activo</s-option>
-                <s-option value="draft">Borrador</s-option>
-                <s-option value="archived">Archivado</s-option>
-              </s-select>
-              <input type="hidden" name="page" value="1" />
-              <s-button type="submit" {...(isLoading ? { loading: true } : {})}>
-                Filtrar
-              </s-button>
-            </s-stack>
-          </Form>
+          <s-stack direction="inline" gap="base" align-items="end">
+            <Form method="get" style={{ flex: 1 }}>
+              <s-stack direction="inline" gap="base">
+                <s-search-field
+                  name="search"
+                  label="Buscar SKU"
+                  label-accessibility-visibility="hidden"
+                  placeholder="Buscar por código SKU…"
+                  value={search}
+                />
+                <s-select name="status" label="Estado" value={status}>
+                  <s-option value="">Todos</s-option>
+                  <s-option value="active">Activo</s-option>
+                  <s-option value="draft">Borrador</s-option>
+                  <s-option value="archived">Archivado</s-option>
+                </s-select>
+                <input type="hidden" name="page" value="1" />
+                <s-button type="submit" {...(isLoading ? { loading: true } : {})}>
+                  Filtrar
+                </s-button>
+              </s-stack>
+            </Form>
+            <s-button
+              variant="secondary"
+              onClick={() =>
+                downloadBlob(
+                  `/api/skus/export${shopifyParams}`,
+                  "skus-export.csv",
+                )
+              }
+            >
+              Exportar CSV
+            </s-button>
+          </s-stack>
         </s-section>
       )}
 
