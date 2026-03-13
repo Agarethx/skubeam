@@ -13,7 +13,16 @@ import type { ForecastRow } from "../models/forecast.server";
 import { useShopifyParams } from "../lib/navigate";
 
 const PAGE_SIZE = 25;
-const GRID_COLS = "200px 1fr 70px 90px 80px 110px 120px";
+const GRID_COLS = "180px 1fr 80px 100px 100px 120px 80px";
+
+// ── Tone palette ──────────────────────────────────────────────────────────────
+
+const TONE_COLOR = {
+  critical: "#D82C0D",
+  low:      "#E3911C",
+  dead:     "#C05717",
+  neutral:  "#6D7175",
+} as const;
 
 // ── Action ───────────────────────────────────────────────────────────────────
 
@@ -24,9 +33,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (formData.get("intent") === "saveConfig") {
     await saveForecastConfig(shopId, {
-      reorder_lead_days:   Number(formData.get("lead_days"))   || 14,
-      safety_stock_days:   Number(formData.get("safety_days")) || 7,
-      forecast_window_days: Number(formData.get("window_days")) || 30,
+      reorder_lead_days:    Number(formData.get("lead_days"))    || 14,
+      safety_stock_days:    Number(formData.get("safety_days"))  || 7,
+      forecast_window_days: Number(formData.get("window_days"))  || 30,
     });
   }
 
@@ -57,37 +66,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .filter((r) => r.status === "critical" || r.status === "low")
     .reduce((sum, r) => sum + r.total_stock * (r.cost_price ?? 0), 0);
 
-  const withVelocity = allRows.filter((r) => r.daily_velocity > 0);
-  const avgDaysStock =
-    withVelocity.length > 0
-      ? Math.round(
-          withVelocity.reduce((sum, r) => sum + r.total_stock / r.daily_velocity, 0) /
-            withVelocity.length,
-        )
-      : null;
-
-  const filtered = statusFilter
-    ? allRows.filter((r) => r.status === statusFilter)
-    : allRows;
-
+  const filtered   = statusFilter ? allRows.filter((r) => r.status === statusFilter) : allRows;
   const total      = filtered.length;
   const totalPages = Math.ceil(total / PAGE_SIZE);
   const rows       = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   return {
-    rows,
-    total,
-    page,
-    totalPages,
-    config,
-    salesData,
-    activeJob,
+    rows, total, page, totalPages,
+    config, salesData, activeJob,
     statusFilter,
-    criticalCount,
-    lowCount,
-    deadCount,
-    atRiskValue,
-    avgDaysStock,
+    criticalCount, lowCount, deadCount, atRiskValue,
   };
 };
 
@@ -122,6 +110,57 @@ function fmtUSD(n: number): string {
   return `$${n.toFixed(0)}`;
 }
 
+// ── KPI filter card ───────────────────────────────────────────────────────────
+
+function ForecastKpiCard({
+  label,
+  value,
+  color,
+  active,
+  onClick,
+}: {
+  label: string;
+  value: string | number;
+  color: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => e.key === "Enter" && onClick()}
+      style={{
+        cursor: "pointer",
+        border: `2px solid ${active ? color : "var(--p-color-border, #e1e3e5)"}`,
+        borderRadius: "var(--p-border-radius-200, 8px)",
+        padding: "16px",
+        background: active ? `${color}12` : "var(--p-color-bg-surface, #fff)",
+        transition: "border-color 0.15s, background 0.15s",
+        userSelect: "none",
+      }}
+    >
+      <s-stack direction="block" gap="small">
+        <s-text color="subdued">{label}</s-text>
+        <p
+          style={{
+            margin: 0,
+            fontSize: "var(--p-font-size-750, 1.75rem)",
+            fontWeight: "var(--p-font-weight-bold, 700)" as React.CSSProperties["fontWeight"],
+            lineHeight: 1.2,
+            color,
+          }}
+        >
+          {value}
+        </p>
+      </s-stack>
+    </div>
+  );
+}
+
+// ── Shared input styles ───────────────────────────────────────────────────────
+
 const INPUT_STYLE: React.CSSProperties = {
   width: "100%",
   padding: "6px 10px",
@@ -144,53 +183,35 @@ const LABEL_STYLE: React.CSSProperties = {
 
 export default function ForecastPage() {
   const {
-    rows,
-    total,
-    page,
-    totalPages,
-    config,
-    salesData,
-    activeJob,
+    rows, total, page, totalPages,
+    config, salesData, activeJob,
     statusFilter,
-    criticalCount,
-    lowCount,
-    deadCount,
-    atRiskValue,
-    avgDaysStock,
+    criticalCount, lowCount, deadCount, atRiskValue,
   } = useLoaderData<typeof loader>();
 
-  const navigate    = useNavigate();
-  const navigation  = useNavigation();
+  const navigate      = useNavigate();
+  const navigation    = useNavigation();
   const shopifyParams = useShopifyParams();
 
-  const startFetcher = useFetcher<{
-    job: { id: string; status: string; type: string };
-  }>();
-  const statusFetcher = useFetcher<{
-    status: string | null;
-    records_processed: number;
-  }>();
-
-  const revalidator = useRevalidator();
-  const pollRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startFetcher  = useFetcher<{ job: { id: string; status: string; type: string } }>();
+  const statusFetcher = useFetcher<{ status: string | null; records_processed: number }>();
+  const revalidator   = useRevalidator();
+  const pollRef       = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const jobId =
-    (startFetcher.data?.job?.type === "orders_sync"
-      ? startFetcher.data.job.id
-      : null) ?? activeJob?.id;
+    (startFetcher.data?.job?.type === "orders_sync" ? startFetcher.data.job.id : null)
+    ?? activeJob?.id;
 
   const polledStatus = statusFetcher.data?.status;
-  const isRunning =
-    !!jobId && polledStatus !== "completed" && polledStatus !== "failed";
+  const isRunning    = !!jobId && polledStatus !== "completed" && polledStatus !== "failed";
+  const isLoading    = navigation.state === "loading";
 
   useEffect(() => {
     if (!jobId) return;
     pollRef.current = setInterval(() => {
       statusFetcher.load(`/api/sync/status?jobId=${jobId}`);
     }, 3000);
-    return () => {
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-    };
+    return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
   }, [jobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -201,7 +222,10 @@ export default function ForecastPage() {
   }, [polledStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const hasReplenishmentItems = criticalCount + lowCount > 0;
-  const isLoading = navigation.state === "loading";
+
+  function filterUrl(s: string): string {
+    return statusFilter === s ? "?" : `?status=${s}`;
+  }
 
   function pageUrl(newPage: number): string {
     const p = new URLSearchParams();
@@ -210,16 +234,9 @@ export default function ForecastPage() {
     return `?${p.toString()}`;
   }
 
-  function filterUrl(s: string): string {
-    return statusFilter === s ? "?" : `?status=${s}`;
-  }
-
   function handleGeneratePO() {
     fetch(`/api/po/generate${shopifyParams}`, { method: "POST" })
-      .then((res) => {
-        if (!res.ok) throw new Error(`${res.status}`);
-        return res.blob();
-      })
+      .then((res) => { if (!res.ok) throw new Error(`${res.status}`); return res.blob(); })
       .then((blob) => {
         const today = new Date().toISOString().slice(0, 10);
         const url = URL.createObjectURL(blob);
@@ -240,186 +257,44 @@ export default function ForecastPage() {
     dead:     "sin rotación",
   };
 
-  const BADGE_BTN: React.CSSProperties = {
-    background: "none",
-    border: "none",
-    padding: 0,
-    cursor: "pointer",
-  };
-
   return (
     <s-page heading="Forecast & Reposición">
 
-      {/* ── Aside 1: Resumen ── */}
-      <s-section slot="aside" heading="Resumen">
-        <s-stack direction="block" gap="base">
-
-          {/* Clickable status badges */}
-          <s-stack direction="block" gap="small">
-            <s-text color="subdued">Filtrar por estado</s-text>
-            <s-stack direction="inline" gap="small">
-              <button
-                onClick={() => navigate(filterUrl("critical"))}
-                style={{ ...BADGE_BTN, opacity: statusFilter && statusFilter !== "critical" ? 0.4 : 1 }}
-              >
-                <s-badge tone="critical">{criticalCount} críticos</s-badge>
-              </button>
-              <button
-                onClick={() => navigate(filterUrl("low"))}
-                style={{ ...BADGE_BTN, opacity: statusFilter && statusFilter !== "low" ? 0.4 : 1 }}
-              >
-                <s-badge tone="caution">{lowCount} bajos</s-badge>
-              </button>
-              <button
-                onClick={() => navigate(filterUrl("dead"))}
-                style={{ ...BADGE_BTN, opacity: statusFilter && statusFilter !== "dead" ? 0.4 : 1 }}
-              >
-                <s-badge tone="warning">{deadCount} sin rotación</s-badge>
-              </button>
-            </s-stack>
-          </s-stack>
-
-          {/* Valor en riesgo */}
-          <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
-            <s-stack direction="block" gap="small">
-              <s-text color="subdued">Valor en riesgo</s-text>
-              <p
-                style={{
-                  margin: 0,
-                  fontSize: "var(--p-font-size-600, 1.25rem)",
-                  fontWeight: "var(--p-font-weight-bold, 700)" as React.CSSProperties["fontWeight"],
-                  color: hasReplenishmentItems
-                    ? "var(--p-color-text-critical, #D82C0D)"
-                    : "var(--p-color-text, inherit)",
-                }}
-              >
-                {fmtUSD(atRiskValue)}
-              </p>
-              <s-text color="subdued">SKUs críticos + bajos × costo</s-text>
-            </s-stack>
-          </s-box>
-
-          {/* Días promedio de stock */}
-          <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
-            <s-stack direction="block" gap="small">
-              <s-text color="subdued">Días promedio de stock</s-text>
-              <p
-                style={{
-                  margin: 0,
-                  fontSize: "var(--p-font-size-600, 1.25rem)",
-                  fontWeight: "var(--p-font-weight-bold, 700)" as React.CSSProperties["fontWeight"],
-                  color: "var(--p-color-text, inherit)",
-                }}
-              >
-                {avgDaysStock != null ? `${avgDaysStock}d` : "—"}
-              </p>
-              <s-text color="subdued">Promedio SKUs activos c/ventas</s-text>
-            </s-stack>
-          </s-box>
-
-          {/* PO button — only when there are items to replenish */}
-          {hasReplenishmentItems && (
-            <div
-              style={{
-                background: "var(--p-color-bg-fill-critical, #D82C0D)",
-                borderRadius: "var(--p-border-radius-200, 8px)",
-                padding: "1px",
-              }}
-            >
-              <s-button variant="primary" onClick={handleGeneratePO}>
-                Generar Orden de Compra
-              </s-button>
-            </div>
-          )}
-        </s-stack>
+      {/* ── Fila 1: KPI cards ── */}
+      <s-section>
+        <s-grid gridTemplateColumns="repeat(4, 1fr)" gap="base">
+          <ForecastKpiCard
+            label="SKUs críticos"
+            value={criticalCount}
+            color={TONE_COLOR.critical}
+            active={statusFilter === "critical"}
+            onClick={() => navigate(filterUrl("critical"))}
+          />
+          <ForecastKpiCard
+            label="SKUs bajos"
+            value={lowCount}
+            color={TONE_COLOR.low}
+            active={statusFilter === "low"}
+            onClick={() => navigate(filterUrl("low"))}
+          />
+          <ForecastKpiCard
+            label="Sin rotación"
+            value={deadCount}
+            color={TONE_COLOR.dead}
+            active={statusFilter === "dead"}
+            onClick={() => navigate(filterUrl("dead"))}
+          />
+          <ForecastKpiCard
+            label="Valor en riesgo"
+            value={fmtUSD(atRiskValue)}
+            color={hasReplenishmentItems ? TONE_COLOR.critical : TONE_COLOR.neutral}
+            active={false}
+            onClick={() => navigate(filterUrl("critical"))}
+          />
+        </s-grid>
       </s-section>
 
-      {/* ── Aside 2: Config ── */}
-      <s-section slot="aside" heading="Configuración">
-        <Form method="post">
-          <input type="hidden" name="intent" value="saveConfig" />
-          <s-stack direction="block" gap="small">
-            <label style={{ display: "block" }}>
-              <span style={LABEL_STYLE}>Lead time (días)</span>
-              <input
-                type="number"
-                name="lead_days"
-                defaultValue={config.reorder_lead_days}
-                min={1}
-                max={365}
-                style={INPUT_STYLE}
-              />
-            </label>
-            <label style={{ display: "block" }}>
-              <span style={LABEL_STYLE}>Safety stock (días)</span>
-              <input
-                type="number"
-                name="safety_days"
-                defaultValue={config.safety_stock_days}
-                min={0}
-                max={90}
-                style={INPUT_STYLE}
-              />
-            </label>
-            <label style={{ display: "block" }}>
-              <span style={LABEL_STYLE}>Ventana forecast (días)</span>
-              <input
-                type="number"
-                name="window_days"
-                defaultValue={config.forecast_window_days}
-                min={7}
-                max={365}
-                style={INPUT_STYLE}
-              />
-            </label>
-            <s-button type="submit" variant="secondary">Guardar config</s-button>
-          </s-stack>
-        </Form>
-      </s-section>
-
-      {/* ── Aside 3: Import orders ── */}
-      <s-section slot="aside" heading="Historial de ventas">
-        {isRunning ? (
-          <s-stack direction="block" gap="small">
-            <s-spinner />
-            <s-text>
-              Importando órdenes…
-              {(statusFetcher.data?.records_processed ?? 0) > 0
-                ? ` (${statusFetcher.data!.records_processed} líneas)`
-                : ""}
-            </s-text>
-          </s-stack>
-        ) : (
-          <s-stack direction="block" gap="small">
-            {salesData ? (
-              <s-badge tone="success">Datos importados</s-badge>
-            ) : (
-              <s-text>
-                Sin historial de ventas. Importa para calcular velocidad y
-                reorder points.
-              </s-text>
-            )}
-            <startFetcher.Form method="post" action="/api/sync">
-              <input type="hidden" name="type" value="orders" />
-              <s-button
-                type="submit"
-                variant="secondary"
-                {...(startFetcher.state !== "idle" ? { loading: true } : {})}
-              >
-                {salesData ? "Re-importar historial" : "Importar historial de ventas"}
-              </s-button>
-            </startFetcher.Form>
-            {polledStatus === "failed" && (
-              <s-banner
-                tone="critical"
-                heading="La importación falló. Intenta de nuevo."
-              />
-            )}
-          </s-stack>
-        )}
-      </s-section>
-
-      {/* ── Main: forecast table ── */}
+      {/* ── Fila 2: Tabla full width ── */}
       <s-section heading={`Forecast (${total} SKU${total !== 1 ? "s" : ""})`}>
 
         {/* Active filter banner */}
@@ -436,13 +311,10 @@ export default function ForecastPage() {
 
         {total === 0 ? (
           <s-paragraph>
-            {statusFilter
-              ? "No hay SKUs con ese estado."
-              : "No hay SKUs activos."}
+            {statusFilter ? "No hay SKUs con ese estado." : "No hay SKUs activos."}
           </s-paragraph>
         ) : (
           <s-stack direction="block" gap="base">
-            {/* Grid table */}
             <div
               style={{
                 border: "1px solid var(--p-color-border, #e1e3e5)",
@@ -452,12 +324,12 @@ export default function ForecastPage() {
                 transition: "opacity 0.15s",
               }}
             >
-              {/* Header row */}
+              {/* Header */}
               <div
                 style={{
                   display: "grid",
                   gridTemplateColumns: GRID_COLS,
-                  padding: "8px 16px",
+                  padding: "8px 0",
                   background: "var(--p-color-bg-surface-secondary, #f6f6f7)",
                   borderBottom: "1px solid var(--p-color-border, #e1e3e5)",
                 }}
@@ -467,6 +339,7 @@ export default function ForecastPage() {
                     <span
                       key={i}
                       style={{
+                        padding: "0 8px",
                         fontSize: "var(--p-font-size-300, 0.75rem)",
                         fontWeight: 600,
                         color: "var(--p-color-text-subdued, #6d7175)",
@@ -480,14 +353,14 @@ export default function ForecastPage() {
                 )}
               </div>
 
-              {/* Data rows */}
+              {/* Rows */}
               {rows.map((row, idx) => (
                 <div
                   key={row.id}
                   style={{
                     display: "grid",
                     gridTemplateColumns: GRID_COLS,
-                    padding: "12px 16px",
+                    padding: "10px 0",
                     alignItems: "center",
                     background:
                       idx % 2 === 0
@@ -499,34 +372,27 @@ export default function ForecastPage() {
                         : "none",
                   }}
                 >
-                  <span style={{ fontWeight: 600, fontSize: "var(--p-font-size-350, 0.875rem)" }}>
+                  <span style={{ padding: "0 8px", fontWeight: 600, fontSize: "var(--p-font-size-350, 0.875rem)" }}>
                     {row.sku_code}
                   </span>
-                  <span
-                    style={{
-                      fontSize: "var(--p-font-size-350, 0.875rem)",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
+                  <span style={{ padding: "0 8px", fontSize: "var(--p-font-size-350, 0.875rem)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {row.title ?? "—"}
                   </span>
-                  <span>
+                  <span style={{ padding: "0 8px" }}>
                     <s-badge tone={row.total_stock > 0 ? "success" : "critical"}>
                       {row.total_stock}
                     </s-badge>
                   </span>
-                  <span style={{ fontSize: "var(--p-font-size-350, 0.875rem)" }}>
+                  <span style={{ padding: "0 8px", fontSize: "var(--p-font-size-350, 0.875rem)" }}>
                     {row.daily_velocity > 0 ? fmt(row.daily_velocity) : "—"}
                   </span>
-                  <span style={{ fontSize: "var(--p-font-size-350, 0.875rem)" }}>
+                  <span style={{ padding: "0 8px", fontSize: "var(--p-font-size-350, 0.875rem)" }}>
                     {row.daily_velocity > 0 ? row.reorder_point : "—"}
                   </span>
-                  <span style={{ fontSize: "var(--p-font-size-350, 0.875rem)" }}>
+                  <span style={{ padding: "0 8px", fontSize: "var(--p-font-size-350, 0.875rem)" }}>
                     {row.days_left !== null ? `${row.days_left}d` : "—"}
                   </span>
-                  <span>
+                  <span style={{ padding: "0 8px" }}>
                     <s-badge tone={statusTone(row.status)}>
                       {statusLabel(row.status)}
                     </s-badge>
@@ -536,14 +402,9 @@ export default function ForecastPage() {
             </div>
 
             {/* Pagination */}
-            <s-stack
-              direction="inline"
-              justifyContent="space-between"
-              alignItems="center"
-            >
+            <s-stack direction="inline" justifyContent="space-between" alignItems="center">
               <s-text color="subdued">
-                Página {page} de {totalPages} · {total} SKU
-                {total !== 1 ? "s" : ""}
+                Página {page} de {totalPages} · {total} SKU{total !== 1 ? "s" : ""}
               </s-text>
               {totalPages > 1 && (
                 <s-stack direction="inline" gap="small">
@@ -567,6 +428,116 @@ export default function ForecastPage() {
           </s-stack>
         )}
       </s-section>
+
+      {/* ── Fila 3: Config + Historial en dos columnas ── */}
+      <s-section>
+        <s-grid gridTemplateColumns="1fr 1fr" gap="base">
+
+          {/* Card Configuración */}
+          <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+            <s-stack direction="block" gap="base">
+              <s-text type="strong">Configuración de forecast</s-text>
+              <Form method="post">
+                <input type="hidden" name="intent" value="saveConfig" />
+                <s-stack direction="block" gap="small">
+                  <label style={{ display: "block" }}>
+                    <span style={LABEL_STYLE}>Lead time (días)</span>
+                    <input
+                      type="number"
+                      name="lead_days"
+                      defaultValue={config.reorder_lead_days}
+                      min={1}
+                      max={365}
+                      style={INPUT_STYLE}
+                    />
+                  </label>
+                  <label style={{ display: "block" }}>
+                    <span style={LABEL_STYLE}>Safety stock (días)</span>
+                    <input
+                      type="number"
+                      name="safety_days"
+                      defaultValue={config.safety_stock_days}
+                      min={0}
+                      max={90}
+                      style={INPUT_STYLE}
+                    />
+                  </label>
+                  <label style={{ display: "block" }}>
+                    <span style={LABEL_STYLE}>Ventana forecast (días)</span>
+                    <input
+                      type="number"
+                      name="window_days"
+                      defaultValue={config.forecast_window_days}
+                      min={7}
+                      max={365}
+                      style={INPUT_STYLE}
+                    />
+                  </label>
+                  <s-button type="submit" variant="secondary">Guardar config</s-button>
+                </s-stack>
+              </Form>
+            </s-stack>
+          </s-box>
+
+          {/* Card Historial de ventas + PO */}
+          <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+            <s-stack direction="block" gap="base">
+              <s-text type="strong">Historial de ventas</s-text>
+
+              {isRunning ? (
+                <s-stack direction="block" gap="small">
+                  <s-spinner />
+                  <s-text>
+                    Importando órdenes…
+                    {(statusFetcher.data?.records_processed ?? 0) > 0
+                      ? ` (${statusFetcher.data!.records_processed} líneas)`
+                      : ""}
+                  </s-text>
+                </s-stack>
+              ) : (
+                <s-stack direction="block" gap="small">
+                  {salesData ? (
+                    <s-badge tone="success">Datos importados</s-badge>
+                  ) : (
+                    <s-text color="subdued">
+                      Sin historial. Importa para calcular velocidad y reorder points.
+                    </s-text>
+                  )}
+                  <startFetcher.Form method="post" action="/api/sync">
+                    <input type="hidden" name="type" value="orders" />
+                    <s-button
+                      type="submit"
+                      variant="secondary"
+                      {...(startFetcher.state !== "idle" ? { loading: true } : {})}
+                    >
+                      {salesData ? "Re-importar historial" : "Importar historial de ventas"}
+                    </s-button>
+                  </startFetcher.Form>
+                  {polledStatus === "failed" && (
+                    <s-banner tone="critical" heading="La importación falló. Intenta de nuevo." />
+                  )}
+                </s-stack>
+              )}
+
+              {hasReplenishmentItems && (
+                <>
+                  <div style={{ height: "1px", background: "var(--p-color-border, #e1e3e5)" }} />
+                  <s-stack direction="block" gap="small">
+                    <s-text color="subdued">
+                      {criticalCount + lowCount} SKU{criticalCount + lowCount !== 1 ? "s" : ""} necesitan reposición
+                    </s-text>
+                    <s-button variant="primary" onClick={handleGeneratePO}>
+                      Generar Orden de Compra
+                    </s-button>
+                  </s-stack>
+                </>
+              )}
+            </s-stack>
+          </s-box>
+
+        </s-grid>
+      </s-section>
+
     </s-page>
   );
 }
