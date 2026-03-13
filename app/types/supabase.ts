@@ -386,6 +386,42 @@ export type Database = {
         }
         Relationships: []
       }
+      woo_connections: {
+        Row: {
+          id: string
+          shop_id: string
+          url: string
+          consumer_key: string
+          consumer_secret: string
+          product_count: number | null
+          order_count: number | null
+          analyzed_at: string | null
+          migrated_at: string | null
+        }
+        Insert: {
+          id?: string
+          shop_id: string
+          url: string
+          consumer_key: string
+          consumer_secret: string
+          product_count?: number | null
+          order_count?: number | null
+          analyzed_at?: string | null
+          migrated_at?: string | null
+        }
+        Update: {
+          id?: string
+          shop_id?: string
+          url?: string
+          consumer_key?: string
+          consumer_secret?: string
+          product_count?: number | null
+          order_count?: number | null
+          analyzed_at?: string | null
+          migrated_at?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       sku_analytics: {
