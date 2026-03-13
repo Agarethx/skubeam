@@ -1,342 +1,398 @@
-import { useEffect } from "react";
-import type {
-  ActionFunctionArgs,
-  HeadersFunction,
-  LoaderFunctionArgs,
-} from "react-router";
-import { useFetcher } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
-import { authenticate } from "../shopify.server";
+import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { useShopifyParams } from "../lib/navigate";
+import { authenticate } from "../shopify.server";
+import { getShop } from "../models/shop.server";
+import { getShopKpis, getAbcAnalysis } from "../models/analytics.server";
+import { getForecastForShop } from "../models/forecast.server";
+import { getLowestHealthScoreSkus } from "../models/sku.server";
+import { useShopifyParams, useSkuBeamNavigate } from "../lib/navigate";
+import type { DashboardAttentionSku } from "../models/sku.server";
+
+// ── Loader ───────────────────────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const shopId = session.shop;
 
-  return null;
-};
+  const [shop, kpis, abcRows, { rows: forecastRows }, attentionSkus] =
+    await Promise.all([
+      getShop(shopId).catch(() => null),
+      getShopKpis(shopId),
+      getAbcAnalysis(shopId),
+      getForecastForShop(shopId),
+      getLowestHealthScoreSkus(shopId, 10),
+    ]);
 
-export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
-  const color = ["Red", "Orange", "Yellow", "Green"][
-    Math.floor(Math.random() * 4)
-  ];
-  const response = await admin.graphql(
-    `#graphql
-      mutation populateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
-            id
-            title
-            handle
-            status
-            variants(first: 10) {
-              edges {
-                node {
-                  id
-                  price
-                  barcode
-                  createdAt
-                }
-              }
-            }
-            demoInfo: metafield(namespace: "$app", key: "demo_info") {
-              jsonValue
-            }
-          }
-        }
-      }`,
-    {
-      variables: {
-        product: {
-          title: `${color} Snowboard`,
-          metafields: [
-            {
-              namespace: "$app",
-              key: "demo_info",
-              value: "Created by React Router Template",
-            },
-          ],
-        },
-      },
-    },
-  );
-  const responseJson = await response.json();
+  const criticalCount = forecastRows.filter((r) => r.status === "critical").length;
 
-  const product = responseJson.data!.productCreate!.product!;
-  const variantId = product.variants.edges[0]!.node!.id!;
+  const reorderMap = new Map(forecastRows.map((r) => [r.id, r.reorder_point]));
 
-  const variantResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-          price
-          barcode
-          createdAt
-        }
-      }
-    }`,
-    {
-      variables: {
-        productId: product.id,
-        variants: [{ id: variantId, price: "100.00" }],
-      },
-    },
-  );
+  const attentionWithReorder = attentionSkus.map((s) => ({
+    ...s,
+    reorder_point: reorderMap.get(s.id) ?? null,
+  }));
 
-  const variantResponseJson = await variantResponse.json();
-
-  const metaobjectResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpsertMetaobject($handle: MetaobjectHandleInput!, $metaobject: MetaobjectUpsertInput!) {
-      metaobjectUpsert(handle: $handle, metaobject: $metaobject) {
-        metaobject {
-          id
-          handle
-          title: field(key: "title") {
-            jsonValue
-          }
-          description: field(key: "description") {
-            jsonValue
-          }
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }`,
-    {
-      variables: {
-        handle: {
-          type: "$app:example",
-          handle: "demo-entry",
-        },
-        metaobject: {
-          fields: [
-            { key: "title", value: "Demo Entry" },
-            {
-              key: "description",
-              value:
-                "This metaobject was created by the Shopify app template to demonstrate the metaobject API.",
-            },
-          ],
-        },
-      },
-    },
-  );
-
-  const metaobjectResponseJson = await metaobjectResponse.json();
-
-  return {
-    product: responseJson!.data!.productCreate!.product,
-    variant:
-      variantResponseJson!.data!.productVariantsBulkUpdate!.productVariants,
-    metaobject:
-      metaobjectResponseJson!.data!.metaobjectUpsert!.metaobject,
+  const abcCounts = {
+    A: abcRows.filter((r) => r.abc_class === "A").length,
+    B: abcRows.filter((r) => r.abc_class === "B").length,
+    C: abcRows.filter((r) => r.abc_class === "C").length,
   };
+
+  return { shopId, shop, kpis, abcCounts, criticalCount, attentionSkus: attentionWithReorder };
 };
 
-export default function Index() {
-  const fetcher = useFetcher<typeof action>();
-  const shopifyParams = useShopifyParams();
-  const shopify = useAppBridge();
-  const isLoading =
-    ["loading", "submitting"].includes(fetcher.state) &&
-    fetcher.formMethod === "POST";
+// ── Formatting helpers ────────────────────────────────────────────────────────
 
-  useEffect(() => {
-    if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
-    }
-  }, [fetcher.data?.product?.id, shopify]);
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return "Nunca";
+  return new Date(iso).toLocaleString("es-CL", { dateStyle: "short", timeStyle: "short" });
+}
 
-  const generateProduct = () => fetcher.submit({}, { method: "POST" });
+/** Returns "—" when there are no sales-cost data to avoid misleading $0 display */
+function fmtCurrency(n: number): string {
+  if (n <= 0) return "—";
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
+  return `$${n.toFixed(0)}`;
+}
+
+function fmtRatio(n: number): string {
+  if (n <= 0) return "—";
+  return n.toFixed(2);
+}
+
+function planLabel(plan: string | null | undefined): string {
+  switch (plan) {
+    case "starter": return "Starter";
+    case "growth":  return "Growth";
+    case "pro":     return "Pro";
+    default:        return "Trial";
+  }
+}
+
+// ── Health score ──────────────────────────────────────────────────────────────
+
+/** Green >70 · Yellow 40–70 · Red <40 (as requested) */
+function scoreColor(score: number): string {
+  if (score > 70) return "#008060";
+  if (score >= 40) return "#E3911C";
+  return "#D82C0D";
+}
+
+// ── KPI card ─────────────────────────────────────────────────────────────────
+
+function KpiCard({
+  label,
+  value,
+  badgeTone,
+  badge,
+}: {
+  label: string;
+  value: string;
+  badgeTone?: "critical" | "caution" | "success" | "neutral" | "warning" | "info";
+  badge?: string;
+}) {
+  return (
+    <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+      <s-stack direction="block" gap="small">
+        {/* subdued label */}
+        <s-text color="subdued">{label}</s-text>
+
+        {/* Large metric number — no size variant on s-heading, use p + Polaris tokens */}
+        <p
+          style={{
+            margin: 0,
+            fontSize: "var(--p-font-size-750, 1.75rem)",
+            fontWeight: "var(--p-font-weight-bold, 700)" as React.CSSProperties["fontWeight"],
+            lineHeight: "var(--p-font-line-height-3, 1.2)",
+            letterSpacing: "-0.01em",
+            color: "var(--p-color-text, inherit)",
+          }}
+        >
+          {value}
+        </p>
+
+        {/* badge — rendered only when provided */}
+        {badge && badgeTone && (
+          <s-badge tone={badgeTone}>{badge}</s-badge>
+        )}
+      </s-stack>
+    </s-box>
+  );
+}
+
+// ── Health progress bar ───────────────────────────────────────────────────────
+
+function HealthBar({ score }: { score: number }) {
+  const color = scoreColor(score);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+      <div
+        style={{
+          width: "64px",
+          height: "6px",
+          background: "var(--p-color-bg-surface-secondary, #E4E5E7)",
+          borderRadius: "3px",
+          overflow: "hidden",
+          flexShrink: 0,
+        }}
+      >
+        <div
+          style={{
+            width: `${score}%`,
+            height: "100%",
+            background: color,
+            borderRadius: "3px",
+          }}
+        />
+      </div>
+      <span
+        style={{
+          fontSize: "var(--p-font-size-300, 0.75rem)",
+          fontWeight: 600,
+          color,
+          minWidth: "24px",
+          tabularNums: "tabular-nums",
+        } as React.CSSProperties}
+      >
+        {score}
+      </span>
+    </div>
+  );
+}
+
+// ── Attention table ───────────────────────────────────────────────────────────
+
+function AttentionTable({
+  rows,
+  shopifyParams,
+}: {
+  rows: (DashboardAttentionSku & { reorder_point: number | null })[];
+  shopifyParams: string;
+}) {
+  if (rows.length === 0) {
+    return (
+      <s-stack direction="block" gap="small">
+        <s-badge tone="success">Todo en orden</s-badge>
+        <s-text color="subdued">
+          No hay SKUs activos con datos incompletos o stock bajo.
+        </s-text>
+      </s-stack>
+    );
+  }
 
   return (
-    <s-page heading="Shopify app template">
-      <s-button slot="primary-action" onClick={generateProduct}>
-        Generate a product
-      </s-button>
+    <s-table>
+      <s-table-header>
+        <s-table-header-row>
+          <s-table-cell>Producto</s-table-cell>
+          <s-table-cell>Stock</s-table-cell>
+          <s-table-cell>Reorder</s-table-cell>
+          <s-table-cell>Health</s-table-cell>
+          <s-table-cell>{/* Acción */}</s-table-cell>
+        </s-table-header-row>
+      </s-table-header>
+      <s-table-body>
+        {rows.map((row) => {
+          const stockTone =
+            row.total_stock === 0
+              ? "critical"
+              : row.total_stock <= (row.reorder_point ?? 0)
+              ? "caution"
+              : "neutral";
 
-      <s-section heading="Congrats on creating a new Shopify app 🎉">
-        <s-paragraph>
-          This embedded app template uses{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
-          >
-            App Bridge
-          </s-link>{" "}
-          interface examples like an{" "}
-          <s-link href={`/app/additional${shopifyParams}`}>additional page in the app nav</s-link>
-          , as well as an{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            Admin GraphQL
-          </s-link>{" "}
-          mutation demo, to provide a starting point for app development.
-        </s-paragraph>
+          return (
+            <s-table-row key={row.id}>
+              <s-table-cell>
+                <s-stack direction="block" gap="none">
+                  <s-text type="strong">{row.sku_code}</s-text>
+                  {row.title && <s-text color="subdued">{row.title}</s-text>}
+                </s-stack>
+              </s-table-cell>
+              <s-table-cell>
+                <s-badge tone={stockTone}>{row.total_stock}</s-badge>
+              </s-table-cell>
+              <s-table-cell>
+                {row.reorder_point != null ? row.reorder_point : "—"}
+              </s-table-cell>
+              <s-table-cell>
+                <HealthBar score={row.health_score} />
+              </s-table-cell>
+              <s-table-cell>
+                <s-link href={`/app/skus/${row.id}${shopifyParams}`}>Ver</s-link>
+              </s-table-cell>
+            </s-table-row>
+          );
+        })}
+      </s-table-body>
+    </s-table>
+  );
+}
+
+// ── Page ─────────────────────────────────────────────────────────────────────
+
+export default function Dashboard() {
+  const { shopId, shop, kpis, abcCounts, criticalCount, attentionSkus } =
+    useLoaderData<typeof loader>();
+
+  const navigate       = useSkuBeamNavigate();
+  const shopifyParams  = useShopifyParams();
+  const bsaleConnected = Boolean(shop?.bsale_token);
+
+  // Short badge labels — avoid truncation inside narrow cards
+  const criticalBadge  = criticalCount > 0 ? `${criticalCount} crítico${criticalCount > 1 ? "s" : ""}` : "OK";
+  const costBadge      = kpis.skus_with_cost > 0 ? `${kpis.skus_with_cost} c/costo` : "Sin datos";
+  const rotBadge       = kpis.turnover_ratio > 0 ? "últ. 30d" : "—";
+
+  return (
+    <s-page heading="Dashboard">
+
+      {/* ── Fila 1: KPI strip — auto-fit grid, naturally responsive ── */}
+      <s-section>
+        <s-grid
+          gridTemplateColumns="repeat(auto-fit, minmax(155px, 1fr))"
+          gap="base"
+        >
+          <KpiCard
+            label="SKUs activos"
+            value={kpis.active_skus.toLocaleString("es-CL")}
+          />
+          <KpiCard
+            label="SKUs críticos"
+            value={criticalCount.toLocaleString("es-CL")}
+            badgeTone={criticalCount > 0 ? "critical" : "success"}
+            badge={criticalBadge}
+          />
+          <KpiCard
+            label="Valor inventario"
+            value={fmtCurrency(kpis.estimated_stock_value)}
+            badgeTone={kpis.skus_with_cost > 0 ? "neutral" : "neutral"}
+            badge={costBadge}
+          />
+          <KpiCard
+            label="Unidades vend. 30d"
+            value={kpis.units_sold_30d.toLocaleString("es-CL")}
+          />
+          <KpiCard
+            label="Rotación"
+            value={fmtRatio(kpis.turnover_ratio)}
+            badgeTone={kpis.turnover_ratio > 0 ? "info" : "neutral"}
+            badge={rotBadge}
+          />
+        </s-grid>
       </s-section>
-      <s-section heading="Get started with products">
-        <s-paragraph>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-          >
-            productCreate
-          </s-link>{" "}
-          mutation in our API references. Includes a product{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data/metafields"
-            target="_blank"
-          >
-            metafield
-          </s-link>{" "}
-          and{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data/metaobjects"
-            target="_blank"
-          >
-            metaobject
-          </s-link>
-          .
-        </s-paragraph>
-        <s-stack direction="inline" gap="base">
-          <s-button
-            onClick={generateProduct}
-            {...(isLoading ? { loading: true } : {})}
-          >
-            Generate a product
+
+      {/* ── Fila 2 left: SKUs que necesitan atención ── */}
+      <s-section heading="SKUs que necesitan atención">
+        <AttentionTable rows={attentionSkus} shopifyParams={shopifyParams} />
+        {attentionSkus.length > 0 && (
+          <s-button variant="tertiary" onClick={() => navigate("/app/skus")}>
+            Ver todos los SKUs →
           </s-button>
-          {fetcher.data?.product && (
-            <s-button
-              onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
-                  value: fetcher.data?.product?.id,
-                });
-              }}
-              target="_blank"
-              variant="tertiary"
-            >
-              Edit product
-            </s-button>
-          )}
-        </s-stack>
-        {fetcher.data?.product && (
-          <s-section heading="productCreate mutation">
-            <s-stack direction="block" gap="base">
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.product, null, 2)}</code>
-                </pre>
-              </s-box>
-
-              <s-heading>productVariantsBulkUpdate mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.variant, null, 2)}</code>
-                </pre>
-              </s-box>
-
-              <s-heading>metaobjectUpsert mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>
-                    {JSON.stringify(fetcher.data.metaobject, null, 2)}
-                  </code>
-                </pre>
-              </s-box>
-            </s-stack>
-          </s-section>
         )}
       </s-section>
 
-      <s-section slot="aside" heading="App template specs">
-        <s-paragraph>
-          <s-text>Framework: </s-text>
-          <s-link href="https://reactrouter.com/" target="_blank">
-            React Router
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Interface: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/app-home/using-polaris-components"
-            target="_blank"
-          >
-            Polaris web components
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>API: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            GraphQL
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Custom data: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data"
-            target="_blank"
-          >
-            Metafields &amp; metaobjects
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Database: </s-text>
-          <s-link href="https://supabase.com/" target="_blank">
-            Supabase
-          </s-link>
-        </s-paragraph>
+      {/* ── Fila 3: conditional banners ── */}
+      {criticalCount > 0 && (
+        <s-banner
+          tone="critical"
+          heading={`${criticalCount} SKU${criticalCount !== 1 ? "s" : ""} con stock crítico o agotado`}
+        >
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              Genera una orden de compra con los SKUs que necesitan reposición urgente.
+            </s-paragraph>
+            <s-button
+              variant="primary"
+              onClick={() => {
+                const today = new Date().toISOString().slice(0, 10);
+                fetch(`/api/po/generate${shopifyParams}`, { method: "POST" })
+                  .then((res) => {
+                    if (!res.ok) throw new Error(`${res.status}`);
+                    return res.blob();
+                  })
+                  .then((blob) => {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `purchase-order-${today}.pdf`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  })
+                  .catch((err) => console.error("[PO generate]", err));
+              }}
+            >
+              Generar Orden de Compra
+            </s-button>
+          </s-stack>
+        </s-banner>
+      )}
+
+      {!bsaleConnected && (
+        <s-banner
+          tone="warning"
+          heading="Conecta tu Bsale para activar el sync bidireccional"
+        >
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              Sin la integración Bsale, los descuentos de stock entre tu POS y
+              Shopify no se sincronizan automáticamente.
+            </s-paragraph>
+            <s-button variant="secondary" onClick={() => navigate("/app/integrations")}>
+              Ir a Integraciones
+            </s-button>
+          </s-stack>
+        </s-banner>
+      )}
+
+      {/* ── Fila 2 right: Estado Bsale (aside) ── */}
+      <s-section slot="aside" heading="Estado Bsale">
+        <s-stack direction="block" gap="base">
+          {bsaleConnected ? (
+            <>
+              <s-badge tone="success">Conectado ✓</s-badge>
+              <s-stack direction="block" gap="small">
+                <s-text color="subdued">Último sync</s-text>
+                <s-text>{fmtDate(shop?.bsale_last_sync)}</s-text>
+              </s-stack>
+              <s-text color="subdued">{shopId}</s-text>
+              <s-button variant="secondary" onClick={() => navigate("/app/integrations")}>
+                Sync ahora
+              </s-button>
+            </>
+          ) : (
+            <>
+              <s-badge tone="warning">Sin conectar</s-badge>
+              <s-text color="subdued">
+                Plan: {planLabel(shop?.plan)} · {kpis.active_skus} /{" "}
+                {shop?.sku_limit === -1 ? "∞" : (shop?.sku_limit ?? 500)} SKUs
+              </s-text>
+              <s-button variant="primary" onClick={() => navigate("/app/integrations")}>
+                Conectar Bsale
+              </s-button>
+            </>
+          )}
+        </s-stack>
       </s-section>
 
-      <s-section slot="aside" heading="Next steps">
-        <s-unordered-list>
-          <s-list-item>
-            Build an{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/getting-started/build-app-example"
-              target="_blank"
-            >
-              example app
-            </s-link>
-          </s-list-item>
-          <s-list-item>
-            Explore Shopify&apos;s API with{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/tools/graphiql-admin-api"
-              target="_blank"
-            >
-              GraphiQL
-            </s-link>
-          </s-list-item>
-        </s-unordered-list>
+      {/* ── Fila 2 right: Resumen ABC (aside) ── */}
+      <s-section slot="aside" heading="Resumen ABC">
+        <s-stack direction="block" gap="base">
+          <s-stack direction="inline" gap="small">
+            <s-badge tone="success">{abcCounts.A} tipo A</s-badge>
+            <s-badge tone="caution">{abcCounts.B} tipo B</s-badge>
+            <s-badge tone="neutral">{abcCounts.C} tipo C</s-badge>
+          </s-stack>
+          <s-text color="subdued">A = 80% ventas · B = 15% · C = 5%</s-text>
+          <s-button variant="tertiary" onClick={() => navigate("/app/analytics")}>
+            Ver análisis completo →
+          </s-button>
+        </s-stack>
       </s-section>
+
     </s-page>
   );
 }

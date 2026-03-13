@@ -282,3 +282,69 @@ export function computeHealthScore(
   const score = criteria.reduce((sum, c) => sum + (c.earned ? c.points : 0), 0);
   return { score, criteria };
 }
+
+// ── Dashboard: lowest health score SKUs ──────────────────────────────────────
+
+export interface DashboardAttentionSku {
+  id: string;
+  sku_code: string;
+  title: string | null;
+  total_stock: number;
+  health_score: number;
+}
+
+/**
+ * Returns the `limit` active SKUs with the lowest health score.
+ * Queries both sku_analytics (stock/sales) and skus (barcode) to compute
+ * the full 6-criterion score, then sorts ascending and slices.
+ */
+export async function getLowestHealthScoreSkus(
+  shopId: string,
+  limit: number,
+): Promise<DashboardAttentionSku[]> {
+  const [analyticsResult, skusResult] = await Promise.all([
+    supabaseAdmin
+      .from("sku_analytics")
+      .select("id, sku_code, title, vendor, cost_price, total_stock, sold_30d")
+      .eq("shop_id", shopId)
+      .eq("status", "active"),
+    supabaseAdmin
+      .from("skus")
+      .select("id, barcode")
+      .eq("shop_id", shopId),
+  ]);
+
+  if (analyticsResult.error) {
+    throw new Error(`getLowestHealthScoreSkus: ${analyticsResult.error.message}`);
+  }
+
+  const barcodeMap = new Map(
+    (skusResult.data ?? []).map((s) => [s.id, s.barcode]),
+  );
+
+  const scored = (analyticsResult.data ?? []).map((a) => {
+    const skuForScore = {
+      title:      a.title,
+      barcode:    barcodeMap.get(a.id ?? "") ?? null,
+      vendor:     a.vendor,
+      cost_price: a.cost_price,
+    } as SkuDetail;
+
+    const { score } = computeHealthScore(skuForScore, {
+      total_stock: a.total_stock,
+      sold_30d:    a.sold_30d,
+    });
+
+    return {
+      id:           a.id as string,
+      sku_code:     a.sku_code as string,
+      title:        a.title,
+      total_stock:  Number(a.total_stock ?? 0),
+      health_score: score,
+    };
+  });
+
+  return scored
+    .sort((a, b) => a.health_score - b.health_score)
+    .slice(0, limit);
+}
