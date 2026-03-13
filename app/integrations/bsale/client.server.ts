@@ -64,6 +64,29 @@ export async function paginate<T>(
   return all;
 }
 
+/** PUT request to Bsale — used for stock adjustments. */
+export async function put<T>(path: string, token: string, body: unknown): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25_000);
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      method:  "PUT",
+      headers: headers(token),
+      body:    JSON.stringify(body),
+      signal:  controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    throw new Error(`Bsale PUT ${path}: ${res.status} ${res.statusText}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 /** Resolve the token to use: merchant-specific first, then env fallback. */
 export function resolveToken(bsaleToken: string | null | undefined): string {
   const token = bsaleToken ?? process.env.BSALE_ACCESS_TOKEN;

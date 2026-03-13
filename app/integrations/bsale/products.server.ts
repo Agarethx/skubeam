@@ -116,15 +116,16 @@ export async function syncBsaleToSkuBeam(
     const avgCost = costMap.get(v.id) ?? null;
 
     return {
-      shop_id:    shopId,
-      sku_code:   v.code.trim(),
-      barcode:    v.barCode?.trim() || null,
-      title:      v.product?.name
+      shop_id:          shopId,
+      sku_code:         v.code.trim(),
+      barcode:          v.barCode?.trim() || null,
+      title:            v.product?.name
         ? `${v.product.name}${variantLabel}`
         : v.description || v.code,
-      cost_price: avgCost,
-      status:     "active" as const,
-      updated_at: now,
+      cost_price:       avgCost,
+      status:           "active" as const,
+      updated_at:       now,
+      bsale_variant_id: String(v.id),
     };
   });
 

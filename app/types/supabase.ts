@@ -138,6 +138,30 @@ export type Database = {
           },
         ]
       }
+      processed_webhooks: {
+        Row: {
+          external_id: string
+          id: string
+          processed_at: string
+          shop_id: string
+          source: string
+        }
+        Insert: {
+          external_id: string
+          id?: string
+          processed_at?: string
+          shop_id: string
+          source: string
+        }
+        Update: {
+          external_id?: string
+          id?: string
+          processed_at?: string
+          shop_id?: string
+          source?: string
+        }
+        Relationships: []
+      }
       sales_history: {
         Row: {
           id: string
@@ -265,6 +289,7 @@ export type Database = {
         Row: {
           barcode: string | null
           barcode_type: string | null
+          bsale_variant_id: string | null
           cost_price: number | null
           created_at: string | null
           id: string
@@ -282,6 +307,7 @@ export type Database = {
         Insert: {
           barcode?: string | null
           barcode_type?: string | null
+          bsale_variant_id?: string | null
           cost_price?: number | null
           created_at?: string | null
           id?: string
@@ -299,6 +325,7 @@ export type Database = {
         Update: {
           barcode?: string | null
           barcode_type?: string | null
+          bsale_variant_id?: string | null
           cost_price?: number | null
           created_at?: string | null
           id?: string

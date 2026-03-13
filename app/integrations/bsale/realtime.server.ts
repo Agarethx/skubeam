@@ -1,0 +1,378 @@
+import { supabaseAdmin } from "../../db.server";
+import { refreshSkuAnalytics } from "../../models/sync.server";
+import { get, put, resolveToken } from "./client.server";
+
+// ── Shared types ──────────────────────────────────────────────────────────────
+
+type AdminClient = {
+  graphql: (
+    query: string,
+    options?: { variables?: Record<string, unknown> },
+  ) => Promise<Response>;
+};
+
+// ── Shopify order payload (ORDERS_PAID webhook) ───────────────────────────────
+
+interface ShopifyLineItem {
+  id: number;
+  variant_id: number | null;
+  quantity: number;
+}
+
+export interface ShopifyOrderPayload {
+  id: number;
+  line_items: ShopifyLineItem[];
+}
+
+// ── Bsale notification payload (lightweight webhook — only resourceId) ────────
+
+export interface BsaleNotification {
+  resourceId: string;
+  resource:   string;
+}
+
+// ── Bsale full document (fetched via GET /documents/{id}.json?expand=[details]) ──
+
+interface BsaleDetailItem {
+  id:        number;
+  quantity:  number;
+  variantId?: number;
+  variant?:  { id: number };
+}
+
+interface BsaleFullDocument {
+  id:       number;
+  officeId?: number;
+  details?: {
+    href?:  string;
+    items?: BsaleDetailItem[];
+  };
+}
+
+// ── Idempotency helpers ───────────────────────────────────────────────────────
+
+async function isAlreadyProcessed(
+  shopId:     string,
+  source:     string,
+  externalId: string,
+): Promise<boolean> {
+  const { data } = await supabaseAdmin
+    .from("processed_webhooks")
+    .select("id")
+    .eq("shop_id", shopId)
+    .eq("source", source)
+    .eq("external_id", externalId)
+    .maybeSingle();
+  return data !== null;
+}
+
+async function markProcessed(
+  shopId:     string,
+  source:     string,
+  externalId: string,
+): Promise<void> {
+  await supabaseAdmin
+    .from("processed_webhooks")
+    .upsert(
+      { shop_id: shopId, source, external_id: externalId },
+      { onConflict: "shop_id,source,external_id", ignoreDuplicates: true },
+    );
+}
+
+// ── Flujo 1: Shopify ORDERS_PAID → Bsale stock adjustment ────────────────────
+
+export async function handleShopifyOrderPaid(
+  shopId: string,
+  order:  ShopifyOrderPayload,
+): Promise<void> {
+  const orderId = String(order.id);
+
+  if (await isAlreadyProcessed(shopId, "shopify", `order_${orderId}`)) {
+    console.log(`[realtime] ORDERS_PAID ${orderId} already processed — skip`);
+    return;
+  }
+
+  // Get shop's Bsale token
+  const { data: shop } = await supabaseAdmin
+    .from("shops")
+    .select("bsale_token")
+    .eq("shop_id", shopId)
+    .single();
+
+  if (!shop?.bsale_token) {
+    console.log(`[realtime] Shop ${shopId} has no Bsale token — skip order ${orderId}`);
+    await markProcessed(shopId, "shopify", `order_${orderId}`);
+    return;
+  }
+
+  const token = resolveToken(shop.bsale_token);
+
+  const variantIds = order.line_items
+    .filter((li) => li.variant_id != null)
+    .map((li) => li.variant_id!);
+
+  if (variantIds.length === 0) {
+    await markProcessed(shopId, "shopify", `order_${orderId}`);
+    return;
+  }
+
+  // Look up bsale_variant_id for each shopify_variant_id
+  const { data: skus } = await supabaseAdmin
+    .from("skus")
+    .select("shopify_variant_id, bsale_variant_id")
+    .eq("shop_id", shopId)
+    .in("shopify_variant_id", variantIds)
+    .not("bsale_variant_id", "is", null);
+
+  if (!skus || skus.length === 0) {
+    console.log(`[realtime] No Bsale-mapped SKUs for order ${orderId}`);
+    await markProcessed(shopId, "shopify", `order_${orderId}`);
+    return;
+  }
+
+  const bsaleMap = new Map<number, number>();
+  for (const sku of skus) {
+    if (sku.shopify_variant_id != null && sku.bsale_variant_id != null) {
+      bsaleMap.set(sku.shopify_variant_id, Number(sku.bsale_variant_id));
+    }
+  }
+
+  // Adjust Bsale stock for each mapped line item
+  for (const lineItem of order.line_items) {
+    if (!lineItem.variant_id) continue;
+    const bsaleVariantId = bsaleMap.get(lineItem.variant_id);
+    if (!bsaleVariantId) continue;
+
+    try {
+      await put("/stocks/adjustments.json", token, {
+        quantity:  -lineItem.quantity,
+        officeId:  1,
+        variantId: bsaleVariantId,
+      });
+      console.log(
+        `[realtime] Bsale stock adjusted: variantId=${bsaleVariantId} delta=-${lineItem.quantity}`,
+      );
+    } catch (err) {
+      console.error(
+        `[realtime] Bsale adjustment failed for variantId=${bsaleVariantId}:`,
+        err,
+      );
+    }
+  }
+
+  await markProcessed(shopId, "shopify", `order_${orderId}`);
+}
+
+// ── Flujo 2: Bsale document:add → Shopify inventory adjustment ───────────────
+
+export async function handleBsaleDocumentAdd(
+  shopId:     string,
+  documentId: string,
+  admin:      AdminClient,
+): Promise<void> {
+  if (await isAlreadyProcessed(shopId, "bsale", `doc_${documentId}`)) {
+    console.log(`[realtime] Bsale document ${documentId} already processed — skip`);
+    return;
+  }
+
+  // Get shop's Bsale token (needed to fetch the full document)
+  const { data: shop } = await supabaseAdmin
+    .from("shops")
+    .select("bsale_token")
+    .eq("shop_id", shopId)
+    .single();
+
+  if (!shop?.bsale_token) {
+    console.log(`[realtime] Shop ${shopId} has no Bsale token — skip document ${documentId}`);
+    await markProcessed(shopId, "bsale", `doc_${documentId}`);
+    return;
+  }
+
+  const token = resolveToken(shop.bsale_token);
+
+  // Fetch the full document — the webhook notification only carries resourceId
+  const doc = await get<BsaleFullDocument>(
+    `/documents/${documentId}.json?expand=[details]`,
+    token,
+  );
+
+  // Log once to confirm the real structure from Bsale
+  console.log("[realtime] Bsale full document:", JSON.stringify(doc, null, 2));
+
+  const details = doc.details?.items ?? [];
+
+  if (details.length === 0) {
+    console.log(`[realtime] Document ${documentId} has no details — skip`);
+    await markProcessed(shopId, "bsale", `doc_${documentId}`);
+    return;
+  }
+
+  // Extract Bsale variant IDs from the document line items
+  const bsaleVariantIds = details
+    .map((d) => d.variantId ?? d.variant?.id)
+    .filter((id): id is number => id != null);
+
+  if (bsaleVariantIds.length === 0) {
+    await markProcessed(shopId, "bsale", `doc_${documentId}`);
+    return;
+  }
+
+  // Look up shopify_variant_id for each bsale_variant_id
+  const { data: skus } = await supabaseAdmin
+    .from("skus")
+    .select("shopify_variant_id, bsale_variant_id")
+    .eq("shop_id", shopId)
+    .in("bsale_variant_id", bsaleVariantIds.map(String))
+    .not("shopify_variant_id", "is", null);
+
+  if (!skus || skus.length === 0) {
+    console.log(`[realtime] No Shopify-mapped SKUs for Bsale document ${documentId}`);
+    await markProcessed(shopId, "bsale", `doc_${documentId}`);
+    return;
+  }
+
+  // bsale_variant_id → shopify_variant_id
+  const shopifyMap = new Map<number, number>();
+  for (const sku of skus) {
+    if (sku.bsale_variant_id != null && sku.shopify_variant_id != null) {
+      shopifyMap.set(Number(sku.bsale_variant_id), sku.shopify_variant_id);
+    }
+  }
+
+  // Unique Shopify variant IDs we need to resolve to inventoryItemId
+  const shopifyVariantIds = [
+    ...new Set(
+      details
+        .map((d) => {
+          const bId = d.variantId ?? d.variant?.id;
+          return bId != null ? shopifyMap.get(bId) : undefined;
+        })
+        .filter((id): id is number => id != null),
+    ),
+  ];
+
+  if (shopifyVariantIds.length === 0) {
+    await markProcessed(shopId, "bsale", `doc_${documentId}`);
+    return;
+  }
+
+  // Query Shopify: inventoryItemId per variant + first active location (in parallel)
+  const variantGids = shopifyVariantIds.map(
+    (id) => `gid://shopify/ProductVariant/${id}`,
+  );
+
+  const [inventoryRes, locRes] = await Promise.all([
+    admin.graphql(
+      `#graphql
+      query GetVariantInventoryItems($ids: [ID!]!) {
+        nodes(ids: $ids) {
+          ... on ProductVariant {
+            id
+            inventoryItem { id }
+          }
+        }
+      }`,
+      { variables: { ids: variantGids } },
+    ),
+    admin.graphql(`#graphql
+      query GetFirstLocation {
+        locations(first: 1, includeLegacy: false) {
+          edges { node { id } }
+        }
+      }`),
+  ]);
+
+  const inventoryJson = await inventoryRes.json() as {
+    data?: {
+      nodes?: Array<{ id: string; inventoryItem?: { id: string } } | null>;
+    };
+  };
+  const locJson = await locRes.json() as {
+    data?: { locations?: { edges: Array<{ node: { id: string } }> } };
+  };
+
+  // shopify_variant_id → inventoryItem GID
+  const itemMap = new Map<number, string>();
+  for (const node of inventoryJson.data?.nodes ?? []) {
+    if (!node?.inventoryItem?.id) continue;
+    const varId = parseInt(node.id.split("/").pop()!, 10);
+    itemMap.set(varId, node.inventoryItem.id);
+  }
+
+  const locationId = locJson.data?.locations?.edges[0]?.node.id;
+  if (!locationId) {
+    console.error(`[realtime] No active Shopify location for shop ${shopId}`);
+    await markProcessed(shopId, "bsale", `doc_${documentId}`);
+    return;
+  }
+
+  // Build delta changes (always negative — this is a sale)
+  const changes: Array<{
+    inventoryItemId: string;
+    locationId:      string;
+    delta:           number;
+  }> = [];
+
+  for (const detail of details) {
+    const bsaleVarId = detail.variantId ?? detail.variant?.id;
+    if (bsaleVarId == null) continue;
+    const shopifyVarId = shopifyMap.get(bsaleVarId);
+    if (shopifyVarId == null) continue;
+    const inventoryItemId = itemMap.get(shopifyVarId);
+    if (!inventoryItemId) continue;
+
+    changes.push({
+      inventoryItemId,
+      locationId,
+      delta: -Math.abs(detail.quantity),
+    });
+  }
+
+  if (changes.length === 0) {
+    await markProcessed(shopId, "bsale", `doc_${documentId}`);
+    return;
+  }
+
+  // Call Shopify inventoryAdjustQuantities (delta, not absolute)
+  const adjustRes = await admin.graphql(
+    `#graphql
+    mutation AdjustInventory($input: InventoryAdjustQuantitiesInput!) {
+      inventoryAdjustQuantities(input: $input) {
+        userErrors { field message }
+        inventoryAdjustmentGroup { createdAt }
+      }
+    }`,
+    {
+      variables: {
+        input: {
+          reason:  "correction",
+          name:    "available",
+          changes,
+        },
+      },
+    },
+  );
+
+  const adjustJson = await adjustRes.json() as {
+    data?: {
+      inventoryAdjustQuantities?: {
+        userErrors: Array<{ field: string; message: string }>;
+      };
+    };
+  };
+
+  const userErrors = adjustJson.data?.inventoryAdjustQuantities?.userErrors ?? [];
+  if (userErrors.length > 0) {
+    console.error(
+      `[realtime] inventoryAdjustQuantities errors doc ${documentId}:`,
+      userErrors,
+    );
+  } else {
+    console.log(
+      `[realtime] Shopify inventory adjusted for Bsale doc ${documentId} (${changes.length} items)`,
+    );
+  }
+
+  await refreshSkuAnalytics();
+  await markProcessed(shopId, "bsale", `doc_${documentId}`);
+}

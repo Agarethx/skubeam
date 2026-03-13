@@ -28,6 +28,8 @@ skubeam/
 │   │   ├── webhooks.app.scopes_update.tsx       # Scopes update
 │   │   ├── webhooks.bulk_operations.finish.tsx  # BULK_OPERATIONS_FINISH
 │   │   ├── webhooks.products.update.tsx         # PRODUCTS_UPDATE → upsertSkuFromShopify
+│   │   ├── webhooks.orders.paid.tsx             # ORDERS_PAID → handleShopifyOrderPaid (Bsale adj.)
+│   │   ├── webhooks.bsale.document.tsx          # POST /webhooks/bsale/document (público, Bsale→Shopify)
 │   │   └── webhooks.gdpr.tsx                    # CUSTOMERS_DATA_REQUEST/REDACT, SHOP_REDACT
 │   │
 │   ├── lib/
@@ -57,7 +59,8 @@ skubeam/
 │   │   ├── 20260311120654_initial_schema.sql    # skus, inventory_levels, sales_history,
 │   │   │                                        # sync_jobs, forecast_configs, gdpr_requests,
 │   │   │                                        # sku_analytics (materialized view)
-│   │   └── 20260312000000_sales_history_line_item.sql  # shopify_line_item_id para idempotencia
+│   │   ├── 20260312000000_sales_history_line_item.sql  # shopify_line_item_id para idempotencia
+│   │   └── 20260312_bidirectional_sync.sql             # processed_webhooks + bsale_variant_id en skus
 │   └── seed.sql                                 # Datos de prueba para forecast/analytics (10 SKUs)
 │
 ├── shopify.app.toml                             # Scopes + webhooks registrados
@@ -160,6 +163,7 @@ El scope anterior del scaffold (`write_metaobject_definitions,...`) causaba scop
 APP_UNINSTALLED         → /webhooks/app/uninstalled
 BULK_OPERATIONS_FINISH  → /webhooks/bulk_operations/finish
 PRODUCTS_UPDATE         → /webhooks/products/update
+ORDERS_PAID             → /webhooks/orders/paid  (Bsale stock adjustment)
 CUSTOMERS_DATA_REQUEST  → /webhooks/gdpr
 CUSTOMERS_REDACT        → /webhooks/gdpr
 SHOP_REDACT             → /webhooks/gdpr
@@ -184,9 +188,10 @@ skus               → Variantes de Shopify sincronizadas
 inventory_levels   → Stock por location
 sales_history      → Historial de ventas (shopify_line_item_id para idempotencia)
 sync_jobs          → Tracking de bulk operations (type: full_product_sync | orders_sync)
-forecast_configs   → Config de reorder point por merchant
-gdpr_requests      → Auditoría GDPR
-sku_analytics      → Materialized view: fuente de verdad para todos los cálculos
+forecast_configs      → Config de reorder point por merchant
+gdpr_requests         → Auditoría GDPR
+sku_analytics         → Materialized view: fuente de verdad para todos los cálculos
+processed_webhooks    → Idempotencia para ORDERS_PAID y document:add (source+external_id únicos)
 ```
 
 ### shops.sku_limit
@@ -251,7 +256,7 @@ Pendiente del Módulo 3:
 
 ---
 
-## Backlog V1.1: Arquitectura de Integraciones
+## ✅ V1.1: Arquitectura de Integraciones — EN PROGRESO
 
 ### Objetivo
 Permitir que SkuBeam se conecte con ERPs y sistemas de ventas de LATAM (Bsale, Aspel, etc.) usando una **interfaz común** por integración. Cada integración vive en `app/integrations/<nombre>/` y expone los mismos métodos, lo que permite agregar integraciones nuevas sin modificar la lógica core.
@@ -259,11 +264,12 @@ Permitir que SkuBeam se conecte con ERPs y sistemas de ventas de LATAM (Bsale, A
 ### Estructura de directorios
 ```
 app/integrations/
-├── types.ts                    # Interfaz común IntegrationAdapter
 ├── bsale/
-│   ├── adapter.server.ts       # Implementa IntegrationAdapter con Bsale API REST
-│   ├── auth.server.ts          # OAuth / token management para Bsale
-│   └── webhooks.server.ts      # Recepción de eventos de Bsale (stock, ventas)
+│   ├── client.server.ts        # get(), paginate(), put(), resolveToken()
+│   ├── products.server.ts      # syncBsaleToSkuBeam, getBsaleShopifyDiff
+│   ├── stocks.server.ts        # syncBsaleStockToSkuBeam
+│   ├── jobs.server.ts          # createBsaleJob, processBsale*Job
+│   └── realtime.server.ts      # handleShopifyOrderPaid, handleBsaleDocumentAdd
 └── (future: aspel/, siigo/, etc.)
 ```
 
@@ -301,12 +307,34 @@ export interface StockChangeEvent {
 }
 ```
 
-### Primera integración target: Bsale API REST
+### ✅ Primera integración: Bsale API REST — SYNC MANUAL COMPLETADO
 - **Auth**: API key por merchant (guardada en `shops.settings` JSONB)
-- **syncProducts**: `GET /v1/variant.json` → upsert en `skus`
-- **syncStock**: `GET /v1/stock.json?officeId=X` → upsert en `inventory_levels` + refresh
-- **pushPurchaseOrder**: `POST /v1/purchaseOrder.json`
-- **onStockChange**: webhook entrante de Bsale → `POST /webhooks/bsale/stock`
+- **syncProducts**: `GET /v1/variant.json` → upsert en `skus` ✅
+- **syncStock**: `GET /v1/stock.json?officeId=X` → upsert en `inventory_levels` + refresh ✅
+- **pushPurchaseOrder**: `POST /v1/purchaseOrder.json` ✅
+- **onStockChange**: webhook entrante de Bsale → `POST /webhooks/bsale/stock` ✅
+
+### ✅ Sync bidireccional en tiempo real — COMPLETADO
+
+#### Flujo 1 — Shopify → Bsale (descuento de stock por venta)
+- **Trigger**: webhook `ORDERS_PAID` de Shopify
+- **Acción**: por cada line item de la orden, llamar `PUT /v1/stocks/adjustments.json` en Bsale para descontar la cantidad vendida
+- **Handler**: `app/integrations/bsale/webhooks.server.ts` → función `handleShopifyOrderPaid`
+- **Ruta**: registrar `ORDERS_PAID` en `shopify.server.ts` → `/webhooks/orders/paid`
+
+#### Flujo 2 — Bsale → Shopify (descuento de stock por documento de venta)
+- **Trigger**: webhook de Bsale evento `document:add` (documento de venta creado en Bsale)
+- **Acción**: por cada detalle del documento, llamar `inventoryAdjustQuantities` GraphQL mutation en Shopify Admin API para descontar el stock de la variante correspondiente
+- **Handler**: `app/integrations/bsale/webhooks.server.ts` → función `handleBsaleDocumentAdd`
+- **Ruta**: `POST /webhooks/bsale/document` — verificación por token secreto (no HMAC)
+- **Registro del webhook**: Bsale no tiene registro automático — se debe registrar manualmente la URL de callback desde el **panel de Bsale** en Configuración → Webhooks, apuntando a `https://<app-domain>/webhooks/bsale/document`
+- **Endpoint de webhooks Bsale**: `POST /v1/webhooks.json` (para gestión programática si se necesita en el futuro)
+
+#### Reglas para el sync bidireccional
+- Idempotencia obligatoria en ambos flujos — usar `shopify_order_id` + `line_item_id` y `bsale_document_id` + `detail_id` como claves de deduplicación
+- Llamar `refreshSkuAnalytics()` al final de cualquier ajuste de stock en Supabase
+- Los ajustes de Bsale → Shopify usan `inventoryAdjustQuantities` (delta), no `inventorySetQuantities` (absoluto)
+- Loggear en `sync_jobs` cada operación de sync en tiempo real para auditoría
 
 ### Reglas para integraciones
 - Credenciales siempre en `shops.settings` (JSONB), nunca hardcodeadas
