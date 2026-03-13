@@ -1,5 +1,4 @@
 import type { ActionFunctionArgs } from "react-router";
-import { unauthenticated } from "../shopify.server";
 import {
   handleBsaleDocumentAdd,
   type BsaleNotification,
@@ -48,11 +47,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return new Response(null, { status: 200 });
     }
 
-    // 4. Get admin client via stored offline token (no browser session needed)
-    const { admin } = await unauthenticated.admin(shopDomain);
-
-    // 5. Fetch full document from Bsale and adjust Shopify inventory
-    await handleBsaleDocumentAdd(shopDomain, resourceId, admin);
+    // 4. Fetch full Bsale document and adjust Shopify inventory
+    // (handler loads its own GraphQL client from the stored offline session)
+    await handleBsaleDocumentAdd(shopDomain, resourceId);
   } catch (err) {
     console.error("[webhooks.bsale.document]", err);
   }

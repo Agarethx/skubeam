@@ -1,15 +1,40 @@
 import { supabaseAdmin } from "../../db.server";
 import { refreshSkuAnalytics } from "../../models/sync.server";
+import { apiVersion } from "../../shopify.server";
 import { get, put, resolveToken } from "./client.server";
 
-// ── Shared types ──────────────────────────────────────────────────────────────
+// ── Shopify GraphQL client built from stored offline session ──────────────────
+// unauthenticated.admin() fails in external webhook contexts (no request cookie).
+// Instead, we load the offline access token directly from shopify_sessions.
 
-type AdminClient = {
-  graphql: (
-    query: string,
-    options?: { variables?: Record<string, unknown> },
-  ) => Promise<Response>;
-};
+async function getShopifyGraphQLClient(shopDomain: string) {
+  const { data } = await supabaseAdmin
+    .from("shopify_sessions")
+    .select("access_token")
+    .eq("shop", shopDomain)
+    .eq("is_online", false)
+    .limit(1)
+    .single();
+
+  if (!data?.access_token) {
+    throw new Error(`[realtime] No offline session found for shop ${shopDomain}`);
+  }
+
+  const token    = data.access_token;
+  const endpoint = `https://${shopDomain}/admin/api/${apiVersion}/graphql.json`;
+
+  return {
+    graphql: (query: string, options?: { variables?: Record<string, unknown> }) =>
+      fetch(endpoint, {
+        method:  "POST",
+        headers: {
+          "Content-Type":             "application/json",
+          "X-Shopify-Access-Token":   token,
+        },
+        body: JSON.stringify({ query, variables: options?.variables }),
+      }),
+  };
+}
 
 // ── Shopify order payload (ORDERS_PAID webhook) ───────────────────────────────
 
@@ -168,7 +193,6 @@ export async function handleShopifyOrderPaid(
 export async function handleBsaleDocumentAdd(
   shopId:     string,
   documentId: string,
-  admin:      AdminClient,
 ): Promise<void> {
   if (await isAlreadyProcessed(shopId, "bsale", `doc_${documentId}`)) {
     console.log(`[realtime] Bsale document ${documentId} already processed — skip`);
@@ -255,6 +279,9 @@ export async function handleBsaleDocumentAdd(
     await markProcessed(shopId, "bsale", `doc_${documentId}`);
     return;
   }
+
+  // Build Shopify GraphQL client from stored offline session
+  const admin = await getShopifyGraphQLClient(shopId);
 
   // Query Shopify: inventoryItemId per variant + first active location (in parallel)
   const variantGids = shopifyVariantIds.map(

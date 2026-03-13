@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Form, useActionData, useLoaderData, useNavigation } from "react-router";
+import { Form, useActionData, useLoaderData, useNavigation, useNavigate, useLocation } from "react-router";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -64,14 +65,49 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
 // ── Action ────────────────────────────────────────────────────────────────────
 
+// Step 1 — create the base product (no variants field in 2026-04+)
 const PRODUCT_CREATE = `#graphql
-  mutation productCreate($input: ProductInput!) {
+  mutation ProductCreate($input: ProductInput!) {
     productCreate(input: $input) {
       product {
         id
-        variants(first: 1) { edges { node { id } } }
+        variants(first: 1) { edges { node { id inventoryItem { id } } } }
       }
       userErrors { field message }
+    }
+  }`;
+
+// Step 2 — update the default (or existing) variant with SKU, price and cost
+const VARIANTS_BULK_UPDATE = `#graphql
+  mutation ProductVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants { id }
+      userErrors { field message }
+    }
+  }`;
+
+// Step 3 — enable inventory tracking on the inventory item
+const INVENTORY_ITEM_UPDATE = `#graphql
+  mutation InventoryItemUpdate($id: ID!, $input: InventoryItemInput!) {
+    inventoryItemUpdate(id: $id, input: $input) {
+      inventoryItem { id tracked }
+      userErrors { field message }
+    }
+  }`;
+
+// Step 4 — set initial stock from Bsale (delta from 0 = total_stock)
+const INVENTORY_ADJUST_QUANTITIES = `#graphql
+  mutation InventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!) {
+    inventoryAdjustQuantities(input: $input) {
+      userErrors { field message }
+    }
+  }`;
+
+// Pre-flight — first active location for the shop
+const GET_FIRST_LOCATION = `#graphql
+  query GetFirstLocation {
+    locations(first: 1, includeLegacy: false) {
+      edges { node { id } }
     }
   }`;
 
@@ -87,60 +123,176 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   let failed    = 0;
   const errors: string[] = [];
 
-  // Fetch the Supabase rows for the selected IDs in one query
+  // Fetch rows — include shopify IDs so we can distinguish new vs. changed
   const { data: rows } = await supabaseAdmin
     .from("skus")
-    .select("id, sku_code, title")
+    .select("id, sku_code, title, cost_price, shopify_variant_id, shopify_product_id")
     .eq("shop_id", shopId)
     .in("id", selected);
 
   const rowMap = new Map((rows ?? []).map((r) => [r.id, r]));
 
+  // Pre-fetch location + stock totals once — used for all new products in this batch
+  const skuCodes = (rows ?? []).map((r) => r.sku_code);
+
+  const [locRes, stockRes] = await Promise.all([
+    admin.graphql(GET_FIRST_LOCATION),
+    supabaseAdmin
+      .from("sku_analytics")
+      .select("sku_code, total_stock")
+      .eq("shop_id", shopId)
+      .in("sku_code", skuCodes),
+  ]);
+
+  const locJson = await locRes.json() as {
+    data?: { locations?: { edges: Array<{ node: { id: string } }> } };
+  };
+  const locationId = locJson.data?.locations?.edges[0]?.node.id ?? null;
+
+  const stockMap = new Map<string, number>(
+    (stockRes.data ?? []).map((r) => [r.sku_code, r.total_stock ?? 0]),
+  );
+
   for (const supabaseId of selected) {
     const row = rowMap.get(supabaseId);
     if (!row) continue;
 
+    const cost = row.cost_price != null ? String(row.cost_price) : "0";
+
     try {
-      const res  = await admin.graphql(PRODUCT_CREATE, {
-        variables: {
-          input: {
-            title:    row.title ?? row.sku_code,
-            variants: [{ sku: row.sku_code, price: "0.00" }],
+      let productGid: string;
+      let variantGid: string;
+      let inventoryItemGid: string | null = null;
+      const isNewProduct = row.shopify_variant_id == null;
+
+      if (isNewProduct) {
+        // ── New product: two-step flow ────────────────────────────────────────
+
+        // Step 1: create the base product (title only — no variants input)
+        const createRes = await admin.graphql(PRODUCT_CREATE, {
+          variables: {
+            input: { title: row.title ?? row.sku_code },
           },
+        });
+        const createJson = await createRes.json() as {
+          data?: {
+            productCreate?: {
+              product?: {
+                id: string;
+                variants: { edges: Array<{ node: { id: string; inventoryItem?: { id: string } } }> };
+              };
+              userErrors: Array<{ field: string; message: string }>;
+            };
+          };
+        };
+
+        const createResult = createJson.data?.productCreate;
+        if (createResult?.userErrors?.length) {
+          errors.push(`${row.sku_code}: ${createResult.userErrors[0].message}`);
+          failed++;
+          continue;
+        }
+
+        const product = createResult?.product;
+        if (!product) {
+          errors.push(`${row.sku_code}: productCreate no retornó producto`);
+          failed++;
+          continue;
+        }
+
+        productGid        = product.id;
+        const defaultVariant = product.variants.edges[0]?.node;
+        variantGid        = defaultVariant?.id ?? "";
+        inventoryItemGid  = defaultVariant?.inventoryItem?.id ?? null;
+
+        if (!variantGid) {
+          errors.push(`${row.sku_code}: no se encontró la variante default`);
+          failed++;
+          continue;
+        }
+      } else {
+        // ── Changed product: update only ──────────────────────────────────────
+        productGid = `gid://shopify/Product/${row.shopify_product_id}`;
+        variantGid = `gid://shopify/ProductVariant/${row.shopify_variant_id}`;
+      }
+
+      // Step 2: set SKU (via inventoryItem.sku), price and cost on the variant
+      // In API 2026-04, `sku` moved from ProductVariantsBulkInput → InventoryItemInput
+      const updateRes = await admin.graphql(VARIANTS_BULK_UPDATE, {
+        variables: {
+          productId: productGid,
+          variants: [{
+            id:            variantGid,
+            price:         "0.00",
+            inventoryItem: { sku: row.sku_code, cost },
+          }],
         },
       });
-      const json = await res.json() as {
+      const updateJson = await updateRes.json() as {
         data?: {
-          productCreate?: {
-            product?: {
-              id: string;
-              variants: { edges: Array<{ node: { id: string } }> };
-            };
+          productVariantsBulkUpdate?: {
             userErrors: Array<{ field: string; message: string }>;
           };
         };
       };
 
-      const result = json.data?.productCreate;
-      if (result?.userErrors?.length) {
-        errors.push(`${row.sku_code}: ${result.userErrors[0].message}`);
+      const updateErrors = updateJson.data?.productVariantsBulkUpdate?.userErrors ?? [];
+      if (updateErrors.length) {
+        errors.push(`${row.sku_code}: ${updateErrors[0].message}`);
         failed++;
         continue;
       }
 
-      // Back-fill Shopify IDs into Supabase
-      const product = result?.product;
-      if (product) {
-        const variantGid = product.variants.edges[0]?.node.id ?? "";
+      // Back-fill Shopify IDs into Supabase (only needed for new products)
+      if (isNewProduct) {
         await supabaseAdmin
           .from("skus")
           .update({
-            shopify_product_id: Number(product.id.replace("gid://shopify/Product/", "")),
+            shopify_product_id: Number(productGid.replace("gid://shopify/Product/", "")),
             shopify_variant_id: Number(variantGid.replace("gid://shopify/ProductVariant/", "")),
           })
           .eq("id", supabaseId)
           .eq("shop_id", shopId);
       }
+
+      // Steps 3 + 4: activate inventory tracking and set initial stock
+      // Only for new products — existing products already have tracked inventory
+      if (isNewProduct && inventoryItemGid && locationId) {
+        const totalStock = stockMap.get(row.sku_code) ?? 0;
+
+        // Step 3: enable tracked = true on the inventory item
+        const trackRes = await admin.graphql(INVENTORY_ITEM_UPDATE, {
+          variables: { id: inventoryItemGid, input: { tracked: true } },
+        });
+        const trackJson = await trackRes.json() as {
+          data?: { inventoryItemUpdate?: { userErrors: Array<{ field: string; message: string }> } };
+        };
+        const trackErrors = trackJson.data?.inventoryItemUpdate?.userErrors ?? [];
+        if (trackErrors.length) {
+          console.warn(`[diff] inventoryItemUpdate errors for ${row.sku_code}:`, trackErrors);
+        }
+
+        // Step 4: set initial stock (delta from 0 = total_stock from sku_analytics)
+        if (totalStock > 0) {
+          const stockRes2 = await admin.graphql(INVENTORY_ADJUST_QUANTITIES, {
+            variables: {
+              input: {
+                reason:  "correction",
+                name:    "available",
+                changes: [{ inventoryItemId: inventoryItemGid, locationId, delta: totalStock }],
+              },
+            },
+          });
+          const stockJson = await stockRes2.json() as {
+            data?: { inventoryAdjustQuantities?: { userErrors: Array<{ field: string; message: string }> } };
+          };
+          const stockErrors = stockJson.data?.inventoryAdjustQuantities?.userErrors ?? [];
+          if (stockErrors.length) {
+            console.warn(`[diff] inventoryAdjustQuantities errors for ${row.sku_code}:`, stockErrors);
+          }
+        }
+      }
+
       published++;
     } catch (err) {
       errors.push(`${row.sku_code}: ${err instanceof Error ? err.message : String(err)}`);
@@ -160,6 +312,17 @@ export default function BsaleDiffPage() {
 
   const isSubmitting = navigation.state === "submitting";
   const isLoading    = navigation.state === "loading";
+
+  const rrNavigate = useNavigate();
+  const location   = useLocation();
+  const shopify    = useAppBridge();
+
+  function goToPage(p: number) {
+    const params = new URLSearchParams(location.search);
+    params.set("page", String(p));
+    shopify.loading(true);
+    rrNavigate(`?${params.toString()}`);
+  }
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
@@ -322,9 +485,7 @@ export default function BsaleDiffPage() {
                   <s-button
                     type="button"
                     variant="secondary"
-                    onClick={() => {
-                      window.location.href = `?page=${page - 1}`;
-                    }}
+                    onClick={() => goToPage(page - 1)}
                   >
                     ← Anterior
                   </s-button>
@@ -333,9 +494,7 @@ export default function BsaleDiffPage() {
                   <s-button
                     type="button"
                     variant="secondary"
-                    onClick={() => {
-                      window.location.href = `?page=${page + 1}`;
-                    }}
+                    onClick={() => goToPage(page + 1)}
                   >
                     Siguiente →
                   </s-button>
