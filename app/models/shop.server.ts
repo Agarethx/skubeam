@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../db.server";
+import { SKU_LIMITS } from "../lib/plans";
 
 // ── Upsert ────────────────────────────────────────────────────────────────────
 
@@ -58,8 +59,9 @@ export async function checkSkuLimit(shopId: string): Promise<SkuLimitResult> {
       .neq("status", "archived"),
   ]);
 
-  const limit: number = shopResult.data?.sku_limit ?? 500;
   const plan: string = shopResult.data?.plan ?? "trial";
+  // SKU_LIMITS is the source of truth; fall back to sku_limit column for legacy rows
+  const limit: number = SKU_LIMITS[plan] ?? shopResult.data?.sku_limit ?? 500;
   const current: number = countResult.count ?? 0;
 
   return {
