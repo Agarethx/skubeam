@@ -254,14 +254,6 @@ const INVENTORY_ITEM_UPDATE_MUTATION = `
   }
 `;
 
-const INVENTORY_ADJUST_MUTATION = `
-  mutation inventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!) {
-    inventoryAdjustQuantities(input: $input) {
-      inventoryAdjustmentGroup { reason }
-      userErrors { field message }
-    }
-  }
-`;
 
 const PRODUCT_CREATE_MEDIA_MUTATION = `
   mutation productCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
@@ -358,22 +350,28 @@ async function createShopifyProductForSku(
 
     // ── Step 4: inventoryAdjustQuantities (set stock) ─────────────────────
     if (stockQty != null && stockQty > 0) {
-      const adjRes = await shopifyGQL(ctx, INVENTORY_ADJUST_MUTATION, {
-        input: {
-          reason:  "correction",
-          name:    "available",
-          changes: [{
-            inventoryItemId: inventoryItemGid,
-            locationId:      ctx.locationGid,
-            delta:           stockQty,
-          }],
+      const inventoryItemNumericId = gidToNumeric(inventoryItemGid);
+      const locationNumericId      = gidToNumeric(ctx.locationGid);
+      const stockRes = await fetch(
+        `https://${ctx.shopId}/admin/api/2026-04/inventory_levels/set.json`,
+        {
+          method:  "POST",
+          headers: {
+            "Content-Type":           "application/json",
+            "X-Shopify-Access-Token": ctx.accessToken,
+          },
+          body: JSON.stringify({
+            location_id:       locationNumericId,
+            inventory_item_id: inventoryItemNumericId,
+            available:         stockQty,
+          }),
         },
-      });
-      const adjErrors = ((adjRes as {
-        data?: { inventoryAdjustQuantities?: { userErrors: Array<{ field: string; message: string }> } };
-      }).data?.inventoryAdjustQuantities?.userErrors) ?? [];
-      if (adjErrors.length) {
-        console.warn("[woo-jobs] inventoryAdjustQuantities userErrors", adjErrors);
+      );
+      if (!stockRes.ok) {
+        const body = await stockRes.text();
+        console.warn("[woo-jobs] REST inventory/set failed", { inventoryItemNumericId, status: stockRes.status, body });
+      } else {
+        console.log("[woo-jobs] stock set via REST", { sku: skuCode, available: stockQty });
       }
     }
 
@@ -681,20 +679,35 @@ async function createShopifyVariableProduct(
         inventoryItemId: m.inventoryItemGid,
         locationId:      ctx.locationGid,
         delta:           m.variation.stockQty as number,
+        sku:             m.variation.sku,
       }));
 
     if (stockChanges.length > 0) {
-      console.log("[woo-jobs] step 5: adjusting stock", { changes: stockChanges.length });
-      const adjRes = await shopifyGQL(ctx, INVENTORY_ADJUST_MUTATION, {
-        input: { reason: "correction", name: "available", changes: stockChanges },
-      });
-      const adjErrors = ((adjRes as {
-        data?: { inventoryAdjustQuantities?: { userErrors: Array<{ field: string; message: string }> } };
-      }).data?.inventoryAdjustQuantities?.userErrors) ?? [];
-      if (adjErrors.length) {
-        console.warn("[woo-jobs] step 5 userErrors", adjErrors);
-      } else {
-        console.log("[woo-jobs] step 5 done — stock adjusted");
+      console.log("[woo-jobs] step 5: setting stock via REST", { changes: stockChanges.length });
+      for (const change of stockChanges) {
+        const inventoryItemNumericId = gidToNumeric(change.inventoryItemId);
+        const locationNumericId      = gidToNumeric(change.locationId);
+        const stockRes = await fetch(
+          `https://${ctx.shopId}/admin/api/2026-04/inventory_levels/set.json`,
+          {
+            method:  "POST",
+            headers: {
+              "Content-Type":           "application/json",
+              "X-Shopify-Access-Token": ctx.accessToken,
+            },
+            body: JSON.stringify({
+              location_id:       locationNumericId,
+              inventory_item_id: inventoryItemNumericId,
+              available:         change.delta,
+            }),
+          },
+        );
+        if (!stockRes.ok) {
+          const body = await stockRes.text();
+          console.warn("[woo-jobs] step 5 REST inventory/set failed", { sku: change.sku, status: stockRes.status, body });
+        } else {
+          console.log("[woo-jobs] step 5 stock set via REST", { sku: change.sku, available: change.delta });
+        }
       }
     }
 
