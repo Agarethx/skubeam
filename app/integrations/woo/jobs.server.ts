@@ -152,8 +152,20 @@ async function shopifyGQL(
       body: JSON.stringify({ query, variables }),
     },
   );
-  if (!res.ok) throw new Error(`Shopify GraphQL HTTP ${res.status}`);
-  return res.json() as Promise<Record<string, unknown>>;
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Shopify GraphQL HTTP ${res.status}: ${body}`);
+  }
+
+  const json = await res.json() as Record<string, unknown>;
+
+  // Surface GraphQL-level errors (HTTP 200 but errors in payload).
+  if (Array.isArray(json.errors) && json.errors.length > 0) {
+    console.error("[woo-jobs] shopifyGQL GraphQL errors", JSON.stringify(json.errors));
+  }
+
+  return json;
 }
 
 function gidToNumeric(gid: string): number {
@@ -163,13 +175,14 @@ function gidToNumeric(gid: string): number {
 // ── Shopify GraphQL mutations ─────────────────────────────────────────────────
 
 // Step 1 for simple products: create product + get default variant.
+// Uses the current `product: ProductCreateInput!` argument (not deprecated `input:`).
 const PRODUCT_CREATE_MUTATION = `
-  mutation productCreate($input: ProductInput!) {
-    productCreate(input: $input) {
+  mutation productCreate($product: ProductCreateInput!) {
+    productCreate(product: $product) {
       product {
         id
         variants(first: 1) {
-          edges { node { id inventoryItem { id } } }
+          nodes { id inventoryItem { id } }
         }
       }
       userErrors { field message }
@@ -177,23 +190,48 @@ const PRODUCT_CREATE_MUTATION = `
   }
 `;
 
-// Step 1 for variable products: create product with productOptions.values so Shopify
-// auto-creates one variant per option value. Returns up to 50 variants with their titles.
-const PRODUCT_CREATE_WITH_OPTIONS_MUTATION = `
-  mutation productCreate($input: ProductInput!) {
-    productCreate(input: $input) {
+// Step 1 for variable products: create product shell — no options, no variants.
+// productVariantsBulkCreate (step 2) adds real variants with REMOVE_STANDALONE_VARIANT.
+// Uses the current `product: ProductCreateInput!` argument (not deprecated `input:`).
+const PRODUCT_CREATE_SHELL_MUTATION = `
+  mutation productCreate($product: ProductCreateInput!) {
+    productCreate(product: $product) {
+      product { id }
+      userErrors { field message }
+    }
+  }
+`;
+
+// Step 2 for variable products: add the option with all values to the product shell.
+// Options must exist before productVariantsBulkCreate can reference them by name.
+const PRODUCT_OPTIONS_CREATE_MUTATION = `
+  mutation productOptionsCreate($productId: ID!, $options: [OptionCreateInput!]!) {
+    productOptionsCreate(productId: $productId, options: $options) {
       product {
-        id
-        variants(first: 50) {
-          edges { node { id title inventoryItem { id } } }
-        }
+        options { id name values }
       }
       userErrors { field message }
     }
   }
 `;
 
-// Updates price (and optionally SKU) on auto-created variants (simple and variable).
+// Step 3 for variable products: create all variants at once.
+// strategy: REMOVE_STANDALONE_VARIANT removes the default variant Shopify auto-creates.
+// Returns variants directly — no extra query needed.
+const VARIANT_BULK_CREATE_MUTATION = `
+  mutation productVariantsBulkCreate(
+    $productId: ID!
+    $variants:  [ProductVariantsBulkInput!]!
+    $strategy:  ProductVariantsBulkCreateStrategy
+  ) {
+    productVariantsBulkCreate(productId: $productId, variants: $variants, strategy: $strategy) {
+      productVariants { id title inventoryItem { id } }
+      userErrors { field message }
+    }
+  }
+`;
+
+// Updates price (and optionally SKU) on existing variants (simple products).
 const VARIANT_UPDATE_MUTATION = `
   mutation productVariantsBulkUpdate(
     $productId: ID!
@@ -221,18 +259,6 @@ const INVENTORY_ADJUST_MUTATION = `
     inventoryAdjustQuantities(input: $input) {
       inventoryAdjustmentGroup { reason }
       userErrors { field message }
-    }
-  }
-`;
-
-// Fetches all variants of a product after creation (used when productCreate returns fewer
-// variants than expected due to API pagination).
-const GET_PRODUCT_VARIANTS_QUERY = `
-  query getProductVariants($id: ID!) {
-    product(id: $id) {
-      variants(first: 50) {
-        edges { node { id title inventoryItem { id } } }
-      }
     }
   }
 `;
@@ -270,7 +296,7 @@ async function createShopifyProductForSku(
   try {
     // ── Step 1: productCreate ─────────────────────────────────────────────
     const createRes = await shopifyGQL(ctx, PRODUCT_CREATE_MUTATION, {
-      input: {
+      product: {
         title,
         ...(vendor ? { vendor } : {}),
       },
@@ -280,8 +306,8 @@ async function createShopifyProductForSku(
       data?: {
         productCreate?: {
           product?: {
-            id: string;
-            variants: { edges: Array<{ node: { id: string; inventoryItem: { id: string } } }> };
+            id:       string;
+            variants: { nodes: Array<{ id: string; inventoryItem: { id: string } }> };
           };
           userErrors: Array<{ field: string; message: string }>;
         };
@@ -296,7 +322,7 @@ async function createShopifyProductForSku(
     if (!product) return null;
 
     const productGid       = product.id;
-    const variantNode      = product.variants.edges[0]?.node;
+    const variantNode      = product.variants.nodes[0];
     if (!variantNode) return null;
     const variantGid       = variantNode.id;
     const inventoryItemGid = variantNode.inventoryItem.id;
@@ -487,28 +513,18 @@ async function createShopifyVariableProduct(
   if (variations.length === 0) return null;
 
   try {
-    // Use a single option dimension whose values are the full attrLabel of each variation
-    // (e.g. "Talla: XS", "Talla: L"). For variations without attributes, fall back to the SKU.
-    const optionName   = "Variante";
-    const optionValues = variations.map((v) => ({ name: v.attrLabel || v.sku }));
-
-    // ── Step 1: productCreate with productOptions.values ──────────────────
-    // Shopify 2026-04 requires values to be present at creation time.
-    // Shopify auto-creates one variant per option value and returns them.
-    console.log("[woo-jobs] createShopifyVariableProduct: step 1 productCreate", {
-      title,
-      vendor,
-      optionName,
-      optionValues,
+    // ── Step 1: productCreate — shell only (title, vendor, tags, description) ──
+    // No options, no variants. productVariantsBulkCreate (step 2) handles variants.
+    console.log("[woo-jobs] createShopifyVariableProduct: step 1 productCreate (shell)", {
+      title, vendor, variationCount: variations.length,
     });
 
-    const createRes = await shopifyGQL(ctx, PRODUCT_CREATE_WITH_OPTIONS_MUTATION, {
-      input: {
+    const createRes = await shopifyGQL(ctx, PRODUCT_CREATE_SHELL_MUTATION, {
+      product: {
         title,
-        ...(vendor           ? { vendor }                          : {}),
-        ...(descriptionHtml  ? { descriptionHtml }                 : {}),
-        tags:           ["migrado-woocommerce", ...categories.map((c) => c.name).filter(Boolean)],
-        productOptions: [{ name: optionName, values: optionValues }],
+        ...(vendor          ? { vendor }          : {}),
+        ...(descriptionHtml ? { descriptionHtml } : {}),
+        tags: ["migrado-woocommerce", ...categories.map((c) => c.name).filter(Boolean)],
       },
     });
 
@@ -517,10 +533,7 @@ async function createShopifyVariableProduct(
     const productCreate = (createRes as {
       data?: {
         productCreate?: {
-          product?: {
-            id:       string;
-            variants: { edges: Array<{ node: { id: string; title: string; inventoryItem: { id: string } } }> };
-          };
+          product?:   { id: string };
           userErrors: Array<{ field: string; message: string }>;
         };
       };
@@ -530,28 +543,98 @@ async function createShopifyVariableProduct(
       console.error("[woo-jobs] step 1 userErrors", productCreate.userErrors);
       return null;
     }
-    const product = productCreate?.product;
-    if (!product) {
+    const productGid = productCreate?.product?.id;
+    if (!productGid) {
       console.error("[woo-jobs] step 1 returned no product — full response:", JSON.stringify(createRes));
       return null;
     }
-
-    const productGid = product.id;
     console.log("[woo-jobs] step 1 done", { productGid });
 
-    // ── Step 1b: query all variants (productCreate may return fewer than expected) ──
-    console.log("[woo-jobs] step 1b: querying all variants for", productGid);
-    const variantsRes = await shopifyGQL(ctx, GET_PRODUCT_VARIANTS_QUERY, { id: productGid });
-    const createdVariants = ((variantsRes as {
-      data?: { product?: { variants: { edges: Array<{ node: { id: string; title: string; inventoryItem: { id: string } } }> } } };
-    }).data?.product?.variants.edges.map((e) => e.node)) ?? [];
-    console.log("[woo-jobs] step 1b done", {
+    // ── Step 2: productOptionsCreate — define option + values on the product ──
+    // Options must exist before productVariantsBulkCreate can reference them by name.
+    const optionName   = "Tamaño";
+    const optionValues = variations.map((v) => ({ name: v.attrLabel || v.sku }));
+
+    console.log("[woo-jobs] step 2: productOptionsCreate", {
+      productGid, optionName, valueCount: optionValues.length, optionValues,
+    });
+
+    const optionsRes = await shopifyGQL(ctx, PRODUCT_OPTIONS_CREATE_MUTATION, {
+      productId: productGid,
+      options:   [{ name: optionName, values: optionValues }],
+    });
+
+    // Log the FULL response — data + any top-level errors — so we can see exactly
+    // what the API returned (including HTTP-200 GraphQL errors or unknown field errors).
+    console.log("[woo-jobs] step 2 full response", JSON.stringify(optionsRes));
+
+    const typed2 = optionsRes as {
+      data?:   { productOptionsCreate?: { product?: { options: Array<{ id: string; name: string; values: string[] }> }; userErrors: Array<{ field: string; message: string }> } };
+      errors?: Array<{ message: string; locations?: unknown }>;
+    };
+
+    if (typed2.errors?.length) {
+      // Top-level GraphQL errors mean the mutation itself was rejected (e.g. unknown field, auth).
+      console.error("[woo-jobs] step 2 GraphQL errors — mutation may not exist in this API version", typed2.errors);
+      return null;
+    }
+
+    const optionsCreate = typed2.data?.productOptionsCreate;
+
+    if (optionsCreate === undefined) {
+      console.error("[woo-jobs] step 2 data.productOptionsCreate is undefined — check mutation name and API version");
+      return null;
+    }
+
+    if (optionsCreate.userErrors?.length) {
+      console.error("[woo-jobs] step 2 userErrors", optionsCreate.userErrors);
+      return null;
+    }
+
+    console.log("[woo-jobs] step 2 done", {
+      options: optionsCreate.product?.options.map((o) => o.name),
+    });
+
+    // ── Step 3: productVariantsBulkCreate — all real variants in one call ──
+    // Option "Tamaño" now exists; REMOVE_STANDALONE_VARIANT removes the default variant.
+    const variantInputs = variations.map((v) => ({
+      price:        v.price ?? undefined,
+      optionValues: [{ optionName, name: v.attrLabel || v.sku }],
+    }));
+
+    console.log("[woo-jobs] step 3: productVariantsBulkCreate", {
+      productGid, variantCount: variantInputs.length, variantInputs,
+    });
+
+    const bulkRes = await shopifyGQL(ctx, VARIANT_BULK_CREATE_MUTATION, {
+      productId: productGid,
+      variants:  variantInputs,
+      strategy:  "REMOVE_STANDALONE_VARIANT",
+    });
+
+    console.log("[woo-jobs] step 3 raw", JSON.stringify((bulkRes as { data?: unknown }).data));
+
+    const bulkCreate = (bulkRes as {
+      data?: {
+        productVariantsBulkCreate?: {
+          productVariants: Array<{ id: string; title: string; inventoryItem: { id: string } }>;
+          userErrors:      Array<{ field: string; message: string }>;
+        };
+      };
+    }).data?.productVariantsBulkCreate;
+
+    if (bulkCreate?.userErrors?.length) {
+      console.error("[woo-jobs] step 3 userErrors", bulkCreate.userErrors);
+      return null;
+    }
+
+    const createdVariants = bulkCreate?.productVariants ?? [];
+    console.log("[woo-jobs] step 3 done", {
       variantCount:  createdVariants.length,
       variantTitles: createdVariants.map((v) => v.title),
     });
 
-    // Map each created variant back to its source variation by matching variant.title
-    // (Shopify sets the title to the option value name we provided).
+    // Match each created variant back to its source variation by title.
     const matched: Array<{
       variantGid:       string;
       inventoryItemGid: string;
@@ -563,7 +646,7 @@ async function createShopifyVariableProduct(
         (v) => (v.attrLabel || v.sku) === createdVariant.title,
       );
       if (!variation) {
-        console.warn("[woo-jobs] step 1: no variation matched for variant title", { title: createdVariant.title });
+        console.warn("[woo-jobs] step 3: no variation matched for title", { title: createdVariant.title });
         continue;
       }
       matched.push({
@@ -575,27 +658,7 @@ async function createShopifyVariableProduct(
 
     console.log("[woo-jobs] matched variations", { matched: matched.length, total: variations.length });
 
-    // ── Step 2: productVariantsBulkUpdate — set price on each auto-created variant ──
-    if (matched.length > 0) {
-      console.log("[woo-jobs] step 2: productVariantsBulkUpdate (prices)");
-      const updateRes = await shopifyGQL(ctx, VARIANT_UPDATE_MUTATION, {
-        productId: productGid,
-        variants:  matched.map((m) => ({
-          id:    m.variantGid,
-          price: m.variation.price ?? undefined,
-        })),
-      });
-      const updateErrors = ((updateRes as {
-        data?: { productVariantsBulkUpdate?: { userErrors: Array<{ field: string; message: string }> } };
-      }).data?.productVariantsBulkUpdate?.userErrors) ?? [];
-      if (updateErrors.length) {
-        console.warn("[woo-jobs] step 2 userErrors", updateErrors);
-      } else {
-        console.log("[woo-jobs] step 2 done — prices set");
-      }
-    }
-
-    // ── Step 3: inventoryItemUpdate per variant — tracked: true + sku ─────
+    // ── Step 4: inventoryItemUpdate per variant — tracked: true + sku ─────
     for (const m of matched) {
       const itemRes = await shopifyGQL(ctx, INVENTORY_ITEM_UPDATE_MUTATION, {
         id:    m.inventoryItemGid,
@@ -605,13 +668,13 @@ async function createShopifyVariableProduct(
         data?: { inventoryItemUpdate?: { userErrors: Array<{ field: string; message: string }> } };
       }).data?.inventoryItemUpdate?.userErrors) ?? [];
       if (itemErrors.length) {
-        console.warn("[woo-jobs] step 3 inventoryItemUpdate userErrors", { sku: m.variation.sku, itemErrors });
+        console.warn("[woo-jobs] step 4 inventoryItemUpdate userErrors", { sku: m.variation.sku, itemErrors });
       } else {
-        console.log("[woo-jobs] step 3 sku set", { sku: m.variation.sku });
+        console.log("[woo-jobs] step 4 sku set", { sku: m.variation.sku });
       }
     }
 
-    // ── Step 4: batch inventoryAdjustQuantities for variants with stock ────
+    // ── Step 5: batch inventoryAdjustQuantities for variants with stock ────
     const stockChanges = matched
       .filter((m) => (m.variation.stockQty ?? 0) > 0)
       .map((m) => ({
@@ -621,7 +684,7 @@ async function createShopifyVariableProduct(
       }));
 
     if (stockChanges.length > 0) {
-      console.log("[woo-jobs] step 4: adjusting stock", { changes: stockChanges.length });
+      console.log("[woo-jobs] step 5: adjusting stock", { changes: stockChanges.length });
       const adjRes = await shopifyGQL(ctx, INVENTORY_ADJUST_MUTATION, {
         input: { reason: "correction", name: "available", changes: stockChanges },
       });
@@ -629,20 +692,20 @@ async function createShopifyVariableProduct(
         data?: { inventoryAdjustQuantities?: { userErrors: Array<{ field: string; message: string }> } };
       }).data?.inventoryAdjustQuantities?.userErrors) ?? [];
       if (adjErrors.length) {
-        console.warn("[woo-jobs] step 4 userErrors", adjErrors);
+        console.warn("[woo-jobs] step 5 userErrors", adjErrors);
       } else {
-        console.log("[woo-jobs] step 4 done — stock adjusted");
+        console.log("[woo-jobs] step 5 done — stock adjusted");
       }
     }
 
-    // ── Step 5: create/associate Shopify collections per WooCommerce category ─
+    // ── Step 6: create/associate Shopify collections per WooCommerce category ─
     if (categories.length > 0) {
       await ensureShopifyCollections(ctx, productGid, categories);
     }
 
-    // ── Step 6: import product images ─────────────────────────────────────
+    // ── Step 7: import product images ─────────────────────────────────────
     if (images.length > 0) {
-      console.log("[woo-jobs] step 6: importing images", { count: images.length });
+      console.log("[woo-jobs] step 7: importing images", { count: images.length });
       const mediaRes = await shopifyGQL(ctx, PRODUCT_CREATE_MEDIA_MUTATION, {
         productId: productGid,
         media:     images.slice(0, 10).map((img) => ({
@@ -655,9 +718,9 @@ async function createShopifyVariableProduct(
         data?: { productCreateMedia?: { userErrors: Array<{ field: string; message: string }> } };
       }).data?.productCreateMedia?.userErrors) ?? [];
       if (mediaErrors.length) {
-        console.warn("[woo-jobs] step 6 productCreateMedia userErrors", mediaErrors);
+        console.warn("[woo-jobs] step 7 productCreateMedia userErrors", mediaErrors);
       } else {
-        console.log("[woo-jobs] step 6 done — images imported");
+        console.log("[woo-jobs] step 7 done — images imported");
       }
     }
 
