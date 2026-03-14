@@ -451,46 +451,93 @@ interface VariationForShopify {
 }
 
 /**
- * Creates (or appends to) a Shopify custom collection for each WooCommerce category.
+ * Gets or creates a Shopify custom collection by name, using a job-level cache
+ * to prevent duplicates across products. Associates the product via POST /collects.json.
  * Best-effort: errors are logged but never thrown.
  */
-async function ensureShopifyCollections(
-  ctx:          ShopifyCtx,
-  productGid:   string,
-  categories:   WooCategory[],
-): Promise<void> {
-  const numericId = gidToNumeric(productGid);
-  for (const category of categories) {
-    if (!category.name) continue;
+async function getOrCreateCollection(
+  name:           string,
+  cache:          Map<string, string>,
+  ctx:            ShopifyCtx,
+  numericProductId: string,
+): Promise<string | null> {
+  const authHeaders = {
+    "Content-Type":           "application/json",
+    "X-Shopify-Access-Token": ctx.accessToken,
+  };
+  const baseUrl = `https://${ctx.shopId}/admin/api/2026-04`;
+
+  let collectionId = cache.get(name);
+
+  if (!collectionId) {
+    // Check if collection already exists in Shopify
     try {
-      const res = await fetch(
-        `https://${ctx.shopId}/admin/api/2026-04/custom_collections.json`,
-        {
-          method:  "POST",
-          headers: {
-            "Content-Type":           "application/json",
-            "X-Shopify-Access-Token": ctx.accessToken,
-          },
-          body: JSON.stringify({
-            custom_collection: {
-              title:    category.name,
-              collects: [{ product_id: numericId }],
-            },
-          }),
-        },
+      const searchRes = await fetch(
+        `${baseUrl}/custom_collections.json?title=${encodeURIComponent(name)}&limit=1`,
+        { headers: authHeaders },
       );
-      if (!res.ok) {
-        const body = await res.text();
-        console.warn("[woo-jobs] ensureShopifyCollection failed", {
-          category: category.name, status: res.status, body,
-        });
-      } else {
-        console.log("[woo-jobs] collection created", { category: category.name });
+      if (searchRes.ok) {
+        const searchJson = await searchRes.json() as { custom_collections?: Array<{ id: number }> };
+        if (searchJson.custom_collections && searchJson.custom_collections.length > 0) {
+          collectionId = String(searchJson.custom_collections[0].id);
+          cache.set(name, collectionId);
+          console.log("[woo-jobs] collection found existing", { name, collectionId });
+        }
       }
     } catch (err) {
-      console.warn("[woo-jobs] ensureShopifyCollection error", { category: category.name, err });
+      console.warn("[woo-jobs] getOrCreateCollection search error", { name, err });
     }
   }
+
+  if (!collectionId) {
+    // Create new collection
+    try {
+      const createRes = await fetch(`${baseUrl}/custom_collections.json`, {
+        method:  "POST",
+        headers: authHeaders,
+        body:    JSON.stringify({ custom_collection: { title: name } }),
+      });
+      if (createRes.ok) {
+        const createJson = await createRes.json() as { custom_collection?: { id: number } };
+        if (createJson.custom_collection?.id) {
+          collectionId = String(createJson.custom_collection.id);
+          cache.set(name, collectionId);
+          console.log("[woo-jobs] collection created", { name, collectionId });
+        }
+      } else {
+        const body = await createRes.text();
+        console.warn("[woo-jobs] collection create failed", { name, status: createRes.status, body });
+        return null;
+      }
+    } catch (err) {
+      console.warn("[woo-jobs] getOrCreateCollection create error", { name, err });
+      return null;
+    }
+  }
+
+  if (!collectionId) return null;
+
+  // Associate product to collection via POST /collects.json
+  try {
+    const collectRes = await fetch(`${baseUrl}/collects.json`, {
+      method:  "POST",
+      headers: authHeaders,
+      body:    JSON.stringify({ collect: { product_id: numericProductId, collection_id: collectionId } }),
+    });
+    if (!collectRes.ok) {
+      const body = await collectRes.text();
+      // 422 means already collected — that's fine
+      if (collectRes.status !== 422) {
+        console.warn("[woo-jobs] collect associate failed", { name, collectionId, status: collectRes.status, body });
+      }
+    } else {
+      console.log("[woo-jobs] product added to collection", { name, collectionId, productId: numericProductId });
+    }
+  } catch (err) {
+    console.warn("[woo-jobs] collect associate error", { name, collectionId, err });
+  }
+
+  return collectionId;
 }
 
 /**
@@ -500,13 +547,14 @@ async function ensureShopifyCollections(
  * total failure.
  */
 async function createShopifyVariableProduct(
-  ctx:             ShopifyCtx,
-  title:           string,
-  vendor:          string | null,
-  descriptionHtml: string,
-  categories:      WooCategory[],
-  images:          WooImage[],
-  variations:      VariationForShopify[],
+  ctx:              ShopifyCtx,
+  title:            string,
+  vendor:           string | null,
+  descriptionHtml:  string,
+  categories:       WooCategory[],
+  images:           WooImage[],
+  variations:       VariationForShopify[],
+  collectionCache:  Map<string, string>,
 ): Promise<Array<{ sku: string; productGid: string; variantGid: string; inventoryItemGid: string }> | null> {
   if (variations.length === 0) return null;
 
@@ -711,9 +759,13 @@ async function createShopifyVariableProduct(
       }
     }
 
-    // ── Step 6: create/associate Shopify collections per WooCommerce category ─
+    // ── Step 6: get/create Shopify collections per WooCommerce category ──────
     if (categories.length > 0) {
-      await ensureShopifyCollections(ctx, productGid, categories);
+      const numericProductId = String(gidToNumeric(productGid));
+      for (const category of categories) {
+        if (!category.name) continue;
+        await getOrCreateCollection(category.name, collectionCache, ctx, numericProductId);
+      }
     }
 
     // ── Step 7: import product images ─────────────────────────────────────
@@ -758,10 +810,11 @@ async function createShopifyVariableProduct(
  * Returns count of successfully processed SKUs.
  */
 async function processVariableProduct(
-  shopId:     string,
-  product:    WooVariableProduct,
-  variations: WooVariation[],
-  shopifyCtx: ShopifyCtx | null,
+  shopId:          string,
+  product:         WooVariableProduct,
+  variations:      WooVariation[],
+  shopifyCtx:      ShopifyCtx | null,
+  collectionCache: Map<string, string>,
 ): Promise<number> {
   console.log("[woo-jobs] processVariableProduct entered", {
     productId:      product.id,
@@ -825,7 +878,7 @@ async function processVariableProduct(
 
       const descriptionHtml = product.description || product.short_description || "";
       const results = await createShopifyVariableProduct(
-        shopifyCtx, product.name, vendor, descriptionHtml, product.categories, product.images, variationsForShopify,
+        shopifyCtx, product.name, vendor, descriptionHtml, product.categories, product.images, variationsForShopify, collectionCache,
       );
 
       console.log("[woo-jobs] createShopifyVariableProduct returned", {
@@ -1046,6 +1099,8 @@ export async function processWooMigration(
     }
 
     let synced = 0;
+    // Job-level cache: collection name → Shopify collection numeric ID
+    const collectionCache = new Map<string, string>();
 
     // ── Phase 1: Products ──────────────────────────────────────────────────
     console.log("[woo-jobs] starting paginateProducts", { preview });
@@ -1071,7 +1126,7 @@ export async function processWooMigration(
           const variations = await getVariations(creds, varProduct.id);
           console.log("[woo-jobs] variations fetched", { count: variations.length });
           console.log("[woo-jobs] calling processVariableProduct", { productId: varProduct.id, variationCount: variations.length, hasShopifyCtx: !!shopifyCtx });
-          const count = await processVariableProduct(shopId, varProduct, variations, shopifyCtx);
+          const count = await processVariableProduct(shopId, varProduct, variations, shopifyCtx, collectionCache);
           synced += count;
         } else {
           console.warn("[woo-jobs] unknown product type, skipping", { id: (product as { id: number }).id, type: (product as { type: string }).type });
