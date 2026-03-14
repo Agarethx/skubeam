@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { supabaseAdmin } from "../db.server";
-import { useSkuBeamNavigate } from "../lib/navigate";
+import { useSkuBeamNavigate, useShopifyParams } from "../lib/navigate";
 
 // ── Loader ───────────────────────────────────────────────────────────────────
 
@@ -12,24 +12,46 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopId = session.shop;
 
-  const { data: conn } = await supabaseAdmin
-    .from("woo_connections")
-    .select("url, product_count, order_count, analyzed_at, migrated_at")
-    .eq("shop_id", shopId)
-    .maybeSingle();
+  const [connResult, activeJobResult, shopResult, lastPreviewJobResult] = await Promise.all([
+    supabaseAdmin
+      .from("woo_connections")
+      .select("url, product_count, order_count, analyzed_at, migrated_at")
+      .eq("shop_id", shopId)
+      .maybeSingle(),
 
-  // Check for an active migration job
-  const { data: activeJob } = await supabaseAdmin
-    .from("sync_jobs")
-    .select("id, status, records_processed, started_at")
-    .eq("shop_id", shopId)
-    .eq("type", "woo_migration")
-    .in("status", ["pending", "running"])
-    .order("started_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    supabaseAdmin
+      .from("sync_jobs")
+      .select("id, type, status, records_processed, started_at")
+      .eq("shop_id", shopId)
+      .in("type", ["woo_migration", "woo_migration_preview"])
+      .in("status", ["pending", "running"])
+      .order("started_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
 
-  return { conn, activeJob };
+    supabaseAdmin
+      .from("shops")
+      .select("woo_migration_preview")
+      .eq("shop_id", shopId)
+      .maybeSingle(),
+
+    supabaseAdmin
+      .from("sync_jobs")
+      .select("records_processed")
+      .eq("shop_id", shopId)
+      .eq("type", "woo_migration_preview")
+      .eq("status", "completed")
+      .order("completed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
+
+  return {
+    conn:              connResult.data,
+    activeJob:         activeJobResult.data,
+    previewDone:       shopResult.data?.woo_migration_preview ?? false,
+    previewRecords:    lastPreviewJobResult.data?.records_processed ?? null,
+  };
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -118,34 +140,83 @@ function PricingCard({ label, price, detail, highlight }: {
   );
 }
 
+// ── Preview done banner ────────────────────────────────────────────────────
+
+function PreviewDoneBanner({
+  records,
+  tier,
+  renderMigrateButton,
+}: {
+  records:             number | null;
+  tier:                { name: string; price: string } | null;
+  renderMigrateButton: () => React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        border: "2px solid var(--p-color-border-brand, #008060)",
+        borderRadius: "var(--p-border-radius-200, 8px)",
+        padding: "20px 24px",
+        background: "var(--p-color-bg-surface-brand, #f0faf7)",
+      }}
+    >
+      <s-stack direction="block" gap="base">
+        <p style={{ margin: 0, fontWeight: 700, fontSize: "var(--p-font-size-400, 1rem)", color: "var(--p-color-text-brand, #008060)" }}>
+          Vista previa completada
+        </p>
+        <p style={{ margin: 0, fontSize: "var(--p-font-size-350, 0.875rem)", color: "var(--p-color-text, inherit)" }}>
+          {records != null
+            ? `${records.toLocaleString("es-CL")} registros importados correctamente.`
+            : "Productos y órdenes importados correctamente."}{" "}
+          ¿Todo se ve bien? Migra el catálogo completo{tier && tier.price !== "$0" ? ` por ${tier.price}` : " gratis"}.
+        </p>
+        <s-stack direction="inline" gap="base" alignItems="center">
+          {renderMigrateButton()}
+          <s-text color="subdued">
+            {tier?.name === "Gratis" ? "Sin costo para tu catálogo" : `Plan ${tier?.name ?? ""} — productos + stock actual`}
+          </s-text>
+        </s-stack>
+      </s-stack>
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────
 
 export default function WooCommercePage() {
-  const { conn, activeJob } = useLoaderData<typeof loader>();
-  const navigate    = useSkuBeamNavigate();
-  const revalidator = useRevalidator();
+  const { conn, activeJob, previewDone, previewRecords } = useLoaderData<typeof loader>();
+  const navigate       = useSkuBeamNavigate();
+  const revalidator    = useRevalidator();
+  const shopifyParams  = useShopifyParams();
+  const migrateAction  = `/api/woo/migrate${shopifyParams}`;
 
   const analyzeFetcher = useFetcher<{ productCount?: number; orderCount?: number; error?: string }>();
-  const migrateFetcher = useFetcher<{ jobId?: string; error?: string }>();
+  // Separate fetchers so each form has its own submission state
+  const previewFetcher = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
+  const migrateFetcher = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
   const statusFetcher  = useFetcher<{ status: string | null; records_processed: number; type: string | null }>();
 
   const [includeOrders, setIncludeOrders] = useState(false);
 
-  // Track polled job id
-  const jobId        = migrateFetcher.data?.jobId ?? activeJob?.id ?? null;
+  // The active job comes from whichever fetcher just submitted, or from the loader (page reload)
+  const activeJobId  = previewFetcher.data?.jobId ?? migrateFetcher.data?.jobId ?? activeJob?.id ?? null;
   const polledStatus = statusFetcher.data?.status;
-  const isMigrating  = !!jobId && polledStatus !== "completed" && polledStatus !== "failed";
+  const isMigrating  = !!activeJobId && polledStatus !== "completed" && polledStatus !== "failed";
+
+  // Was the in-flight/just-finished job a preview?
+  const isPreviewJob = previewFetcher.data?.preview === true
+    || activeJob?.type === "woo_migration_preview";
 
   // Polling
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    if (!jobId) return;
+    if (!activeJobId) return;
     pollRef.current = setInterval(() => {
-      statusFetcher.load(`/api/sync/status?jobId=${jobId}`);
+      statusFetcher.load(`/api/sync/status?jobId=${activeJobId}`);
     }, 3000);
     return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
-  }, [jobId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeJobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (polledStatus === "completed" || polledStatus === "failed") {
@@ -157,8 +228,19 @@ export default function WooCommercePage() {
   const isAnalyzing  = analyzeFetcher.state !== "idle";
   const analyzeResult= analyzeFetcher.data;
   const hasAnalysis  = analyzeResult && "productCount" in analyzeResult;
-  const tier         = hasAnalysis ? pricingTier(analyzeResult.productCount!) : null;
+  const tier         = hasAnalysis
+    ? pricingTier(analyzeResult.productCount!)
+    : conn?.product_count != null ? pricingTier(conn.product_count) : null;
   const alreadyDone  = !!conn?.migrated_at;
+
+  // Estimated total for progress bar (products + orders if applicable)
+  const estimatedTotal = conn
+    ? (conn.product_count ?? 0) + (includeOrders ? (conn.order_count ?? 0) : 0)
+    : null;
+  const recordsDone  = statusFetcher.data?.records_processed ?? 0;
+  const progressPct  = estimatedTotal && estimatedTotal > 0
+    ? Math.min(99, Math.round((recordsDone / estimatedTotal) * 100))
+    : null;
 
   // Determine current step
   const currentStep = isMigrating ? 3
@@ -184,50 +266,145 @@ export default function WooCommercePage() {
         </s-stack>
       </s-section>
 
-      {/* Migration complete banner */}
+      {/* Full migration complete banner */}
       {alreadyDone && polledStatus !== "completed" && (
         <s-banner
           tone="success"
           heading={`Migración completada — ${conn.product_count?.toLocaleString("es-CL") ?? "?"} productos importados desde ${conn.url}`}
         />
       )}
-      {polledStatus === "completed" && (
+      {polledStatus === "completed" && !isPreviewJob && (
         <s-banner
           tone="success"
           heading={`Migración completada — ${statusFetcher.data?.records_processed?.toLocaleString("es-CL")} registros importados`}
         />
       )}
+
+      {/* Preview complete banner (in-session) */}
+      {polledStatus === "completed" && isPreviewJob && (
+        <s-section>
+          <PreviewDoneBanner
+            records={statusFetcher.data?.records_processed ?? null}
+            tier={tier}
+            renderMigrateButton={() => (
+              <migrateFetcher.Form method="post" action={migrateAction}>
+                <input type="hidden" name="include_orders" value={includeOrders ? "1" : "0"} />
+                <input type="hidden" name="preview" value="0" />
+                <s-button
+                  type="submit"
+                  variant="primary"
+                  {...(migrateFetcher.state !== "idle" ? { loading: true } : {})}
+                >
+                  {tier ? `Migrar todo — ${tier.price}` : "Migrar todo"}
+                </s-button>
+              </migrateFetcher.Form>
+            )}
+          />
+        </s-section>
+      )}
+
       {polledStatus === "failed" && (
         <s-banner tone="critical" heading="La migración falló. Revisa los logs e inténtalo de nuevo." />
       )}
 
       {/* ── Active migration progress ── */}
       {isMigrating && (
-        <s-section heading="Migración en curso">
+        <s-section heading={isPreviewJob ? "Vista previa en curso" : "Migración en curso"}>
           <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
             <s-stack direction="block" gap="base">
-              <s-banner tone="info">
-                <s-stack direction="inline" gap="small">
-                  <s-spinner />
-                  <s-text>
-                    Importando datos de WooCommerce
-                    {statusFetcher.data?.records_processed
-                      ? ` — ${statusFetcher.data.records_processed.toLocaleString("es-CL")} registros procesados`
-                      : "…"}
-                  </s-text>
-                </s-stack>
-              </s-banner>
-              <s-text color="subdued">
-                Este proceso puede tardar varios minutos dependiendo del tamaño de tu catálogo.
-                Puedes cerrar esta ventana y volver a revisar el estado más tarde.
-              </s-text>
+              {/* Header row */}
+              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                <s-spinner />
+                <div style={{ flex: 1 }}>
+                  <p style={{ margin: 0, fontWeight: 600, fontSize: "var(--p-font-size-350, 0.875rem)" }}>
+                    {isPreviewJob
+                      ? "Importando muestra de 5 productos y 5 órdenes…"
+                      : "Importando datos de WooCommerce…"}
+                  </p>
+                  {recordsDone > 0 && (
+                    <p style={{ margin: "2px 0 0", fontSize: "var(--p-font-size-300, 0.75rem)", color: "var(--p-color-text-subdued, #6d7175)" }}>
+                      {recordsDone.toLocaleString("es-CL")} registros procesados
+                      {estimatedTotal && estimatedTotal > 0
+                        ? ` de ~${estimatedTotal.toLocaleString("es-CL")}`
+                        : ""}
+                    </p>
+                  )}
+                </div>
+                {progressPct !== null && (
+                  <p style={{ margin: 0, fontWeight: 700, fontSize: "var(--p-font-size-400, 1rem)", color: "var(--p-color-text-brand, #008060)" }}>
+                    {progressPct}%
+                  </p>
+                )}
+              </div>
+
+              {/* Progress bar */}
+              <div style={{ height: "6px", borderRadius: "3px", background: "var(--p-color-bg-fill-secondary, #e4e5e7)", overflow: "hidden" }}>
+                {progressPct !== null ? (
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${progressPct}%`,
+                      background: "var(--p-color-bg-fill-brand, #008060)",
+                      borderRadius: "3px",
+                      transition: "width 0.5s ease",
+                    }}
+                  />
+                ) : (
+                  /* Indeterminate stripe animation when we have no total estimate */
+                  <div
+                    style={{
+                      height: "100%",
+                      width: "40%",
+                      background: "var(--p-color-bg-fill-brand, #008060)",
+                      borderRadius: "3px",
+                      animation: "woo-progress-slide 1.4s ease-in-out infinite",
+                    }}
+                  />
+                )}
+              </div>
+
+              <style>{`
+                @keyframes woo-progress-slide {
+                  0%   { transform: translateX(-100%); }
+                  100% { transform: translateX(350%); }
+                }
+              `}</style>
+
+              {!isPreviewJob && (
+                <s-text color="subdued">
+                  Este proceso puede tardar varios minutos. Puedes cerrar esta ventana y volver más tarde.
+                </s-text>
+              )}
             </s-stack>
           </s-box>
         </s-section>
       )}
 
+      {/* ── Preview done banner (on re-visit, no active analysis) ── */}
+      {previewDone && !alreadyDone && !hasAnalysis && !isMigrating && polledStatus !== "completed" && (
+        <s-section>
+          <PreviewDoneBanner
+            records={previewRecords}
+            tier={tier}
+            renderMigrateButton={() => (
+              <migrateFetcher.Form method="post" action={migrateAction}>
+                <input type="hidden" name="include_orders" value={includeOrders ? "1" : "0"} />
+                <input type="hidden" name="preview" value="0" />
+                <s-button
+                  type="submit"
+                  variant="primary"
+                  {...(migrateFetcher.state !== "idle" ? { loading: true } : {})}
+                >
+                  {tier ? `Migrar todo — ${tier.price}` : "Migrar todo"}
+                </s-button>
+              </migrateFetcher.Form>
+            )}
+          />
+        </s-section>
+      )}
+
       {/* ── Analyze form ── */}
-      {!isMigrating && (
+      {!isMigrating && !(previewDone && !alreadyDone && !hasAnalysis) && (
         <s-section heading="Conectar tienda WooCommerce">
           <analyzeFetcher.Form method="post" action="/api/woo/analyze">
             <s-stack direction="block" gap="base">
@@ -341,20 +518,40 @@ export default function WooCommercePage() {
                   </div>
                 </div>
 
-                {migrateFetcher.data?.error && (
-                  <s-banner tone="critical" heading={migrateFetcher.data.error} />
+                {(previewFetcher.data?.error || migrateFetcher.data?.error) && (
+                  <s-banner tone="critical" heading={previewFetcher.data?.error ?? migrateFetcher.data?.error} />
                 )}
 
-                <migrateFetcher.Form method="post" action="/api/woo/migrate">
-                  <input type="hidden" name="include_orders" value={includeOrders ? "1" : "0"} />
-                  <s-button
-                    type="submit"
-                    variant="primary"
-                    {...(migrateFetcher.state !== "idle" ? { loading: true } : {})}
-                  >
-                    Iniciar migración
-                  </s-button>
-                </migrateFetcher.Form>
+                <s-stack direction="inline" gap="base">
+                  {/* Free preview — uses dedicated previewFetcher */}
+                  {!previewDone && (
+                    <previewFetcher.Form method="post" action={migrateAction}>
+                      <input type="hidden" name="include_orders" value="0" />
+                      <input type="hidden" name="preview" value="1" />
+                      <s-button
+                        type="submit"
+                        variant="secondary"
+                        onClick={() => console.log("[woo] submitting preview")}
+                        {...(previewFetcher.state !== "idle" ? { loading: true } : {})}
+                      >
+                        Probar gratis (5 productos + 5 órdenes)
+                      </s-button>
+                    </previewFetcher.Form>
+                  )}
+
+                  {/* Full migration — uses dedicated migrateFetcher */}
+                  <migrateFetcher.Form method="post" action={migrateAction}>
+                    <input type="hidden" name="include_orders" value={includeOrders ? "1" : "0"} />
+                    <input type="hidden" name="preview" value="0" />
+                    <s-button
+                      type="submit"
+                      variant="primary"
+                      {...(migrateFetcher.state !== "idle" ? { loading: true } : {})}
+                    >
+                      {tier ? `Migrar todo — ${tier.price}` : "Migrar todo"}
+                    </s-button>
+                  </migrateFetcher.Form>
+                </s-stack>
               </s-stack>
             </s-box>
           </s-stack>

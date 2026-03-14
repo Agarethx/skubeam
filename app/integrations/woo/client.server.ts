@@ -6,49 +6,99 @@ export interface WooCredentials {
   consumerSecret: string;
 }
 
-export interface WooSimpleProduct {
-  id: number;
+export interface WooCategory {
+  id:   number;
   name: string;
-  sku: string;
-  type: "simple";
-  status: string;          // publish, draft, etc.
-  price: string;
-  stock_quantity: number | null;
-  manage_stock: boolean;
+  slug: string;
+}
+
+export interface WooImage {
+  id:  number;
+  src: string;
+  alt: string;
+}
+
+export interface WooSimpleProduct {
+  id:                number;
+  name:              string;
+  sku:               string;
+  type:              "simple";
+  status:            string;          // publish, draft, etc.
+  price:             string;
+  regular_price:     string;
+  stock_quantity:    number | null;
+  manage_stock:      boolean;
+  categories:        WooCategory[];
+  description:       string;
+  short_description: string;
+  images:            WooImage[];
 }
 
 export interface WooVariableProduct {
-  id: number;
-  name: string;
-  sku: string;
-  type: "variable";
-  status: string;
-  price: string;
-  variations: number[];  // variation IDs
+  id:                number;
+  name:              string;
+  sku:               string;
+  type:              "variable";
+  status:            string;
+  price:             string;
+  variations:        number[];  // variation IDs
+  categories:        WooCategory[];
+  description:       string;
+  short_description: string;
+  images:            WooImage[];
 }
 
 export type WooProduct = WooSimpleProduct | WooVariableProduct;
 
 export interface WooVariation {
-  id: number;
-  sku: string;
-  price: string;
+  id:             number;
+  sku:            string;
+  price:          string;
+  regular_price:  string;
   stock_quantity: number | null;
-  manage_stock: boolean;
-  attributes: Array<{ name: string; option: string }>;
+  manage_stock:   boolean;
+  attributes:     Array<{ name: string; option: string }>;
+}
+
+export interface WooBillingAddress {
+  first_name: string;
+  last_name:  string;
+  address_1:  string;
+  city:       string;
+  country:    string;
+  phone:      string;
+  email:      string;
+}
+
+export interface WooShippingLine {
+  id:           number;
+  method_id:    string;
+  method_title: string;
+  total:        string;
+}
+
+export interface WooMetaData {
+  id:    number;
+  key:   string;
+  value: string;
 }
 
 export interface WooOrder {
-  id: number;
-  status: string;
-  date_created: string;  // ISO
+  id:                   number;
+  status:               string;
+  date_created:         string;  // ISO
+  payment_method_title: string;
+  billing:              WooBillingAddress;
+  shipping_lines:       WooShippingLine[];
+  meta_data:            WooMetaData[];
   line_items: Array<{
-    id: number;
-    product_id: number;
+    id:           number;
+    product_id:   number;
     variation_id: number;
-    name: string;
-    sku: string;
-    quantity: number;
+    name:         string;
+    sku:          string;
+    quantity:     number;
+    price:        string;
   }>;
 }
 
@@ -102,8 +152,9 @@ export async function getWooCounts(
 /** Paginate all products (simple + variable, page by page). */
 export async function* paginateProducts(
   creds: WooCredentials,
+  options?: { preview?: boolean },
 ): AsyncGenerator<WooProduct[]> {
-  const perPage = 100;
+  const perPage = options?.preview ? 5 : 100;
   let page = 1;
   while (true) {
     const { data, total } = await wooFetch<WooProduct[]>(creds, "/products", {
@@ -113,6 +164,7 @@ export async function* paginateProducts(
     });
     if (data.length === 0) break;
     yield data;
+    if (options?.preview) break;
     if (page * perPage >= total) break;
     page++;
   }
@@ -142,8 +194,9 @@ export async function getVariations(
 /** Paginate orders with status=completed|processing for sales history. */
 export async function* paginateOrders(
   creds: WooCredentials,
+  options?: { preview?: boolean },
 ): AsyncGenerator<WooOrder[]> {
-  const perPage = 100;
+  const perPage = options?.preview ? 5 : 100;
   let page = 1;
   while (true) {
     const { data, total } = await wooFetch<WooOrder[]>(creds, "/orders", {
@@ -154,6 +207,7 @@ export async function* paginateOrders(
     });
     if (data.length === 0) break;
     yield data;
+    if (options?.preview) break;
     if (page * perPage >= total) break;
     page++;
   }

@@ -258,6 +258,7 @@ export type Database = {
           shop_id: string
           sku_limit: number | null
           uninstalled_at: string | null
+          woo_migration_preview: boolean | null
         }
         Insert: {
           bsale_last_sync?: string | null
@@ -270,6 +271,7 @@ export type Database = {
           shop_id: string
           sku_limit?: number | null
           uninstalled_at?: string | null
+          woo_migration_preview?: boolean | null
         }
         Update: {
           bsale_last_sync?: string | null
@@ -282,6 +284,7 @@ export type Database = {
           shop_id?: string
           sku_limit?: number | null
           uninstalled_at?: string | null
+          woo_migration_preview?: boolean | null
         }
         Relationships: []
       }
