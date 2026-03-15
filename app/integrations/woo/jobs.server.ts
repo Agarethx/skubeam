@@ -916,12 +916,15 @@ async function processVariableProduct(
           if (!r.sku) continue;
           await supabaseAdmin
             .from("skus")
-            .update({
-              shopify_product_id: gidToNumeric(r.productGid),
-              shopify_variant_id: gidToNumeric(r.variantGid),
-            })
-            .eq("shop_id", shopId)
-            .eq("sku_code", r.sku);
+            .upsert(
+              {
+                shop_id:            shopId,
+                sku_code:           r.sku,
+                shopify_product_id: gidToNumeric(r.productGid),
+                shopify_variant_id: gidToNumeric(r.variantGid),
+              },
+              { onConflict: "shop_id,sku_code", ignoreDuplicates: false },
+            );
           console.log("[woo-jobs] shopify product created", { sku: r.sku, shopifyProductId: r.productGid });
         }
       }
@@ -946,6 +949,17 @@ async function processVariableProduct(
  * Uses processed_webhooks for idempotency — skips if already migrated.
  * Never throws; returns the Shopify order id or null on failure/skip.
  */
+async function fetchWithRetry(url: string, options: RequestInit, maxRetries = 3): Promise<Response> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const res = await fetch(url, options);
+    if (res.status !== 429) return res;
+    const retryAfter = Number(res.headers.get("Retry-After") || 60);
+    console.log(`[woo-jobs] rate limited, waiting ${retryAfter}s before retry ${attempt + 1}`);
+    await new Promise((r) => setTimeout(r, retryAfter * 1000));
+  }
+  throw new Error("Max retries exceeded on 429");
+}
+
 async function createShopifyOrder(
   ctx:   ShopifyCtx,
   order: import("./client.server").WooOrder,
@@ -966,7 +980,7 @@ async function createShopifyOrder(
   }
 
   try {
-    const res = await fetch(
+    const res = await fetchWithRetry(
       `https://${ctx.shopId}/admin/api/2026-04/orders.json`,
       {
         method:  "POST",
@@ -1061,6 +1075,8 @@ async function importOrdersForShop(
       // Create order in Shopify (idempotent, best-effort)
       if (shopifyCtx) {
         await createShopifyOrder(shopifyCtx, order);
+        // 500ms throttle — dev stores have a ~5 orders/min REST limit
+        await new Promise((r) => setTimeout(r, 500));
       }
 
       // Save each line item to sales_history in Supabase

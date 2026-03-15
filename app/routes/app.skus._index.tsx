@@ -15,8 +15,8 @@ import { useEffect, useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { useShopifyParams } from "../lib/navigate";
-import { listSkus } from "../models/sku.server";
-import type { SkuStatus } from "../models/sku.server";
+import { listSkus, listUnpublishedSkus, getUnpublishedCount } from "../models/sku.server";
+import type { SkuStatus, SkuDetail } from "../models/sku.server";
 import { getActiveSyncJob, startBulkSync } from "../models/sync.server";
 import type { Tables } from "../types/supabase";
 
@@ -41,17 +41,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
 
-  const url = new URL(request.url);
+  const url    = new URL(request.url);
   const search = url.searchParams.get("search") ?? "";
   const status = (url.searchParams.get("status") ?? "") as SkuStatus | "";
-  const page = Math.max(1, Number(url.searchParams.get("page") ?? "1"));
+  const page   = Math.max(1, Number(url.searchParams.get("page") ?? "1"));
+  const tab    = url.searchParams.get("tab") ?? "";
 
-  const [result, activeSyncJob] = await Promise.all([
-    listSkus(session.shop, { search, status, page }),
+  const [result, activeSyncJob, unpublishedCount, unpublishedSkus] = await Promise.all([
+    tab === "unpublished" ? Promise.resolve({ skus: [], total: 0, page: 1, pageSize: 50, totalPages: 0 }) : listSkus(session.shop, { search, status, page }),
     getActiveSyncJob(session.shop),
+    getUnpublishedCount(session.shop),
+    tab === "unpublished" ? listUnpublishedSkus(session.shop).then((r) => r.skus) : Promise.resolve([] as SkuDetail[]),
   ]);
 
-  return { ...result, search, status, activeSyncJob };
+  return { ...result, search, status, tab, activeSyncJob, unpublishedCount, unpublishedSkus };
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -119,16 +122,89 @@ function SyncProgressBanner({ job }: { job: SyncJob }) {
   );
 }
 
+// ── Unpublished SKU row (per-row publish fetcher) ─────────────────────────────
+
+const CELL = { fontSize: "var(--p-font-size-350, 0.875rem)" } as React.CSSProperties;
+const CELL_TRUNCATE: React.CSSProperties = { ...CELL, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+
+function UnpublishedSkuRow({
+  sku,
+  idx,
+  onPublished,
+}: {
+  sku:         SkuDetail;
+  idx:         number;
+  onPublished: (id: string) => void;
+}) {
+  const fetcher = useFetcher<{ success?: boolean; error?: string }>();
+
+  useEffect(() => {
+    if (fetcher.data?.success) onPublished(sku.id);
+  }, [fetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const isPublishing = fetcher.state !== "idle";
+  const published    = fetcher.data?.success === true;
+
+  return (
+    <div
+      style={{
+        display:       "grid",
+        gridTemplateColumns: "200px 1fr 120px 90px 130px 100px",
+        padding:       "12px 16px",
+        alignItems:    "center",
+        background:    idx % 2 === 0
+          ? "var(--p-color-bg-surface, #ffffff)"
+          : "var(--p-color-bg-surface-secondary, #f6f6f7)",
+        opacity:       published ? 0.4 : 1,
+        transition:    "opacity 0.3s",
+      }}
+    >
+      <span style={{ fontWeight: 600, ...CELL }}>{sku.sku_code}</span>
+      <span style={CELL_TRUNCATE}>{sku.title ?? "—"}</span>
+      <span style={CELL_TRUNCATE}>{sku.vendor ?? "—"}</span>
+      <span style={CELL}>{sku.cost_price != null ? `$${sku.cost_price}` : "—"}</span>
+      <span style={{ ...CELL, color: "var(--p-color-text-subdued, #6d7175)" }}>
+        {sku.created_at ? new Date(sku.created_at).toLocaleDateString("es-MX") : "—"}
+      </span>
+      <span>
+        {published ? (
+          <s-badge tone="success">✓ Publicado</s-badge>
+        ) : fetcher.data?.error ? (
+          <s-badge tone="critical">Error</s-badge>
+        ) : (
+          <fetcher.Form method="post" action="/api/publish-sku">
+            <input type="hidden" name="sku_id" value={sku.id} />
+            <s-button
+              type="submit"
+              variant="secondary"
+              {...(isPublishing ? { loading: true } : {})}
+            >
+              Publicar
+            </s-button>
+          </fetcher.Form>
+        )}
+      </span>
+    </div>
+  );
+}
+
 // ── Page component ────────────────────────────────────────────────────────────
 
 export default function SkusIndex() {
-  const { skus, total, page, totalPages, search, status, activeSyncJob } =
+  const { skus, total, page, totalPages, search, status, tab, activeSyncJob, unpublishedCount, unpublishedSkus } =
     useLoaderData<typeof loader>();
 
   const navigation    = useNavigation();
   const navigate      = useNavigate();
   const shopifyParams = useShopifyParams();
   const [localSearch, setLocalSearch] = useState(search);
+  const [hiddenIds, setHiddenIds]     = useState<Set<string>>(new Set());
+  const { revalidate }                = useRevalidator();
+
+  function handlePublished(id: string) {
+    setHiddenIds((prev) => new Set([...prev, id]));
+    revalidate();
+  }
 
   const isLoading = navigation.state === "loading";
   const isImporting =
@@ -139,11 +215,12 @@ export default function SkusIndex() {
     activeSyncJob !== null &&
     (activeSyncJob.status === "running" || activeSyncJob.status === "pending");
 
-  // Build a filtered URL, preserving current search/status params
-  function pageUrl(newPage: number, s = search, st: string = status): string {
+  // Build a filtered URL, preserving current search/status/tab params
+  function pageUrl(newPage: number, s = search, st: string = status, t = tab): string {
     const p = new URLSearchParams();
     if (s) p.set("search", s);
     if (st) p.set("status", st);
+    if (t) p.set("tab", t);
     if (newPage > 1) p.set("page", String(newPage));
     return `?${p.toString()}`;
   }
@@ -162,10 +239,87 @@ export default function SkusIndex() {
     navigate(pageUrl(1, localSearch, newStatus));
   }
 
+  const TAB_STYLE = (active: boolean): React.CSSProperties => ({
+    padding:      "8px 16px",
+    cursor:       "pointer",
+    fontWeight:   active ? 600 : 400,
+    borderBottom: active ? "2px solid var(--p-color-text, #202223)" : "2px solid transparent",
+    borderTop:    "none",
+    borderLeft:   "none",
+    borderRight:  "none",
+    color:        active ? "var(--p-color-text, #202223)" : "var(--p-color-text-subdued, #6d7175)",
+    background:   "none",
+    fontSize:     "var(--p-font-size-350, 0.875rem)",
+  });
+
   return (
     <s-page heading="SKUs">
       {activeSyncJob && <SyncProgressBanner job={activeSyncJob as SyncJob} />}
 
+      {/* ── Tab navigation ── */}
+      <s-section>
+        <div style={{ display: "flex", gap: "0", borderBottom: "1px solid var(--p-color-border, #e1e3e5)" }}>
+          <button style={TAB_STYLE(tab !== "unpublished")} onClick={() => navigate("?")}>
+            Todos los SKUs
+          </button>
+          <button
+            style={TAB_STYLE(tab === "unpublished")}
+            onClick={() => navigate("?tab=unpublished")}
+          >
+            Sin publicar{unpublishedCount > 0 ? ` (${unpublishedCount})` : ""}
+          </button>
+        </div>
+      </s-section>
+
+      {/* ── Unpublished tab ── */}
+      {tab === "unpublished" && (
+        <s-section>
+          <s-stack direction="block" gap="base">
+            <s-banner tone="info">
+              <s-paragraph>
+                Estos SKUs están en SkuBeam pero no en Shopify. Pueden venir de una migración
+                WooCommerce o haber sido creados manualmente.
+              </s-paragraph>
+            </s-banner>
+
+            {unpublishedSkus.length === 0 ? (
+              <s-paragraph>No hay SKUs sin publicar. ✓</s-paragraph>
+            ) : (
+              <div style={{ border: "1px solid var(--p-color-border, #e1e3e5)", borderRadius: "var(--p-border-radius-200, 8px)", overflow: "hidden" }}>
+                {/* Header */}
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "200px 1fr 120px 90px 130px 100px",
+                  padding: "8px 16px",
+                  background: "var(--p-color-bg-surface-secondary, #f6f6f7)",
+                  borderBottom: "1px solid var(--p-color-border, #e1e3e5)",
+                }}>
+                  {(["SKU", "Nombre", "Vendor", "Costo", "Creado", ""] as const).map((label, i) => (
+                    <span key={i} style={{ fontSize: "var(--p-font-size-300, 0.75rem)", fontWeight: 600, color: "var(--p-color-text-subdued, #6d7175)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                      {label}
+                    </span>
+                  ))}
+                </div>
+                {/* Rows */}
+                {(unpublishedSkus as SkuDetail[])
+                  .filter((s) => !hiddenIds.has(s.id))
+                  .map((sku, idx) => (
+                    <UnpublishedSkuRow
+                      key={sku.id}
+                      sku={sku}
+                      idx={idx}
+                      onPublished={handlePublished}
+                    />
+                  ))}
+              </div>
+            )}
+          </s-stack>
+        </s-section>
+      )}
+
+      {/* ── Main tab content (Todos) ── */}
+      {tab !== "unpublished" && (
+      <>
       {/* ── Toolbar: search + status left, export right ── */}
       {total > 0 && (
         <s-section>
@@ -384,6 +538,8 @@ export default function SkusIndex() {
           </s-stack>
         )}
       </s-section>
+      </>
+      )}
     </s-page>
   );
 }

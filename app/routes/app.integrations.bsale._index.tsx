@@ -9,6 +9,7 @@ import {
   createBsaleJob,
   getActiveBsaleJob,
 } from "../integrations/bsale/jobs.server";
+import { registerBsaleWebhook } from "../integrations/bsale/client.server";
 
 // ── Loader ───────────────────────────────────────────────────────────────────
 
@@ -51,7 +52,50 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       .eq("shop_id", shopId);
 
     if (error) return { error: `Error guardando token: ${error.message}` };
+
+    // Auto-register Bsale webhook after saving the token
+    const appUrl = process.env.APP_URL ?? "";
+    if (appUrl) {
+      const webhookUrl = `${appUrl}/webhooks/bsale/document?shop=${shopId}`;
+      const reg = await registerBsaleWebhook(token, webhookUrl);
+      if (!reg.ok) {
+        return { success: "Token guardado. No se pudo registrar el webhook automáticamente — usa el botón 'Re-registrar webhook'.", webhookError: reg.error };
+      }
+      if (reg.skipped) {
+        const reason = reg.reason === "sandbox-no-webhooks"
+          ? "Token guardado. Cuenta sandbox — webhook no registrado."
+          : "Token guardado. Webhook ya estaba registrado en Bsale.";
+        return { success: reason };
+      }
+      return { success: `Token guardado y webhook registrado en Bsale (id: ${reg.id}).` };
+    }
+
     return { success: "Token guardado correctamente." };
+  }
+
+  if (intent === "register_webhook") {
+    const { data: shop } = await supabaseAdmin
+      .from("shops")
+      .select("bsale_token")
+      .eq("shop_id", shopId)
+      .single();
+
+    const token = shop?.bsale_token;
+    if (!token) return { error: "Configura el access token antes de registrar el webhook." };
+
+    const appUrl = process.env.APP_URL ?? "";
+    if (!appUrl) return { error: "APP_URL no está configurado en el entorno." };
+
+    const webhookUrl = `${appUrl}/webhooks/bsale/document?shop=${shopId}`;
+    const reg = await registerBsaleWebhook(token, webhookUrl);
+    if (!reg.ok) return { error: `Error registrando webhook: ${reg.error}` };
+    if (reg.skipped) {
+      const reason = reg.reason === "sandbox-no-webhooks"
+        ? "Cuenta sandbox — el registro de webhooks no está disponible."
+        : "El webhook ya estaba registrado en Bsale.";
+      return { success: reason };
+    }
+    return { success: `Webhook registrado en Bsale (id: ${reg.id}). URL: ${webhookUrl}` };
   }
 
   const { data: shop } = await supabaseAdmin
@@ -112,11 +156,14 @@ export default function BsaleIntegrationPage() {
   const revalidator = useRevalidator();
   const navigate    = useSkuBeamNavigate();
 
+  const webhookFetcher = useFetcher<{ success?: string; error?: string }>();
+
   const createFetcher = useFetcher<{
-    jobId?:   string;
-    jobType?: "bsale_products" | "bsale_stock";
-    error?:   string;
-    success?: string;
+    jobId?:        string;
+    jobType?:      "bsale_products" | "bsale_stock";
+    error?:        string;
+    success?:      string;
+    webhookError?: string;
   }>();
   const triggerFetcher = useFetcher();
   const statusFetcher  = useFetcher<{
@@ -165,12 +212,18 @@ export default function BsaleIntegrationPage() {
     (createFetcher.data && "error" in createFetcher.data
       ? createFetcher.data.error
       : null) ??
+    (webhookFetcher.data && "error" in webhookFetcher.data
+      ? webhookFetcher.data.error
+      : null) ??
     (polledStatus === "failed" ? "La sincronización falló. Revisa los logs." : null);
 
   const successMsg =
-    createFetcher.data && "success" in createFetcher.data
+    (createFetcher.data && "success" in createFetcher.data
       ? createFetcher.data.success
-      : null;
+      : null) ??
+    (webhookFetcher.data && "success" in webhookFetcher.data
+      ? webhookFetcher.data.success
+      : null);
 
   const progressLabel  = statusFetcher.data?.records_processed
     ? ` — ${statusFetcher.data.records_processed} registros`
@@ -277,6 +330,19 @@ export default function BsaleIntegrationPage() {
                   </s-button>
                 </s-stack>
               </Form>
+
+              {hasToken && (
+                <webhookFetcher.Form method="post">
+                  <input type="hidden" name="intent" value="register_webhook" />
+                  <s-button
+                    type="submit"
+                    variant="tertiary"
+                    {...(webhookFetcher.state !== "idle" ? { loading: true } : {})}
+                  >
+                    Re-registrar webhook
+                  </s-button>
+                </webhookFetcher.Form>
+              )}
             </s-stack>
           </s-box>
 

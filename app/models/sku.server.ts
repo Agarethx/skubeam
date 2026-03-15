@@ -46,6 +46,29 @@ export async function listSkus(
   };
 }
 
+// ── Unpublished (no shopify_variant_id) ──────────────────────────────────────
+
+export async function listUnpublishedSkus(shopId: string) {
+  const { data, error, count } = await supabaseAdmin
+    .from("skus")
+    .select("*", { count: "exact" })
+    .eq("shop_id", shopId)
+    .is("shopify_variant_id", null)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`listUnpublishedSkus: ${error.message}`);
+  return { skus: data ?? [], total: count ?? 0 };
+}
+
+export async function getUnpublishedCount(shopId: string): Promise<number> {
+  const { count } = await supabaseAdmin
+    .from("skus")
+    .select("*", { count: "exact", head: true })
+    .eq("shop_id", shopId)
+    .is("shopify_variant_id", null);
+  return count ?? 0;
+}
+
 // ── Detail ───────────────────────────────────────────────────────────────────
 
 export async function getSkuById(shopId: string, id: string) {
