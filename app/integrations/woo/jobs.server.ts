@@ -568,6 +568,7 @@ async function createShopifyVariableProduct(
     const createRes = await shopifyGQL(ctx, PRODUCT_CREATE_SHELL_MUTATION, {
       product: {
         title,
+        status: "ACTIVE",
         ...(vendor          ? { vendor }          : {}),
         ...(descriptionHtml ? { descriptionHtml } : {}),
         tags: ["migrado-woocommerce", ...categories.map((c) => c.name).filter(Boolean)],
@@ -595,6 +596,30 @@ async function createShopifyVariableProduct(
       return null;
     }
     console.log("[woo-jobs] step 1 done", { productGid });
+
+    // ── Step 1b: publish to online store channel via REST ─────────────────
+    const productNumericId = productGid.split("/").pop()!;
+    try {
+      const pubRes = await fetch(
+        `https://${ctx.shopId}/admin/api/2026-04/products/${productNumericId}.json`,
+        {
+          method:  "PUT",
+          headers: {
+            "Content-Type":           "application/json",
+            "X-Shopify-Access-Token": ctx.accessToken,
+          },
+          body: JSON.stringify({ product: { id: Number(productNumericId), published: true } }),
+        },
+      );
+      if (!pubRes.ok) {
+        const body = await pubRes.text();
+        console.warn("[woo-jobs] step 1b publish failed", { productGid, status: pubRes.status, body });
+      } else {
+        console.log("[woo-jobs] step 1b product published to online store", { productGid });
+      }
+    } catch (err) {
+      console.warn("[woo-jobs] step 1b publish error", { productGid, err });
+    }
 
     // ── Step 2: productOptionsCreate — define option + values on the product ──
     // Options must exist before productVariantsBulkCreate can reference them by name.
