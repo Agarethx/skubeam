@@ -1,11 +1,13 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
+import { useLoaderData, useFetcher } from "react-router";
+import { useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { getShop } from "../models/shop.server";
 import { getShopKpis, getAbcAnalysis } from "../models/analytics.server";
 import { getForecastForShop } from "../models/forecast.server";
 import { getLowestHealthScoreSkus } from "../models/sku.server";
+import { supabaseAdmin } from "../db.server";
 import { useShopifyParams, useSkuBeamNavigate } from "../lib/navigate";
 import type { DashboardAttentionSku } from "../models/sku.server";
 
@@ -15,14 +17,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopId = session.shop;
 
-  const [shop, kpis, abcRows, { rows: forecastRows }, attentionSkus] =
+  const [shop, kpis, abcRows, { rows: forecastRows }, attentionSkus, skuCountResult, wooConn] =
     await Promise.all([
       getShop(shopId).catch(() => null),
       getShopKpis(shopId),
       getAbcAnalysis(shopId),
       getForecastForShop(shopId),
       getLowestHealthScoreSkus(shopId, 10),
+      supabaseAdmin.from("skus").select("id", { count: "exact", head: true }).eq("shop_id", shopId),
+      supabaseAdmin.from("woo_connections").select("id").eq("shop_id", shopId).limit(1).maybeSingle(),
     ]);
+
+  const skuCount       = skuCountResult.count ?? 0;
+  const hasBsale       = Boolean(shop?.bsale_token);
+  const hasWooConn     = Boolean(wooConn.data);
+  const showOnboarding = !(shop as { onboarding_done?: boolean } | null)?.onboarding_done && skuCount === 0;
 
   const criticalCount = forecastRows.filter((r) => r.status === "critical").length;
 
@@ -39,7 +48,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     C: abcRows.filter((r) => r.abc_class === "C").length,
   };
 
-  return { shopId, shop, kpis, abcCounts, criticalCount, attentionSkus: attentionWithReorder };
+  return {
+    shopId, shop, kpis, abcCounts, criticalCount, attentionSkus: attentionWithReorder,
+    showOnboarding, hasBsale, hasWooConn, skuCount,
+  };
 };
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
@@ -230,10 +242,204 @@ function AttentionTable({
   );
 }
 
+// ── OnboardingFlow ────────────────────────────────────────────────────────────
+
+const CARD_BTN: React.CSSProperties = {
+  width:        "100%",
+  padding:      "20px",
+  borderRadius: "var(--p-border-radius-200, 8px)",
+  border:       "2px solid var(--p-color-border, #e1e3e5)",
+  background:   "var(--p-color-bg-surface, #fff)",
+  cursor:       "pointer",
+  textAlign:    "left",
+  transition:   "border-color 0.15s, box-shadow 0.15s",
+};
+
+function OnboardingFlow({
+  navigate,
+}: {
+  navigate: (path: string) => void;
+}) {
+  const [screen, setScreen]     = useState<0 | 1 | 2>(0);
+  const [visible, setVisible]   = useState(true);
+  const completeFetcher         = useFetcher<{ ok?: boolean }>();
+
+  function closeAndComplete() {
+    completeFetcher.submit({}, { method: "post", action: "/api/complete-onboarding" });
+    setVisible(false);
+  }
+
+  if (!visible) return null;
+
+  const OVERLAY: React.CSSProperties = {
+    position:       "fixed",
+    inset:          0,
+    zIndex:         100,
+    background:     "rgba(0,0,0,0.5)",
+    display:        "flex",
+    alignItems:     "center",
+    justifyContent: "center",
+    padding:        "24px",
+  };
+
+  const MODAL: React.CSSProperties = {
+    background:    "var(--p-color-bg-surface, #fff)",
+    borderRadius:  "var(--p-border-radius-300, 12px)",
+    width:         "100%",
+    maxWidth:      "560px",
+    padding:       "32px",
+    boxShadow:     "0 8px 40px rgba(0,0,0,0.22)",
+    position:      "relative",
+    display:       "flex",
+    flexDirection: "column",
+    gap:           "24px",
+  };
+
+  const CLOSE_BTN: React.CSSProperties = {
+    position:   "absolute",
+    top:        "16px",
+    right:      "16px",
+    background: "none",
+    border:     "none",
+    cursor:     "pointer",
+    fontSize:   "20px",
+    color:      "var(--p-color-text-subdued, #6d7175)",
+    lineHeight: 1,
+    padding:    "4px",
+  };
+
+  return (
+    <div style={OVERLAY}>
+      <div style={MODAL}>
+
+        {/* X button — closes without marking done */}
+        <button style={CLOSE_BTN} onClick={() => setVisible(false)} aria-label="Cerrar">✕</button>
+
+        {/* ── Screen 0: Welcome ── */}
+        {screen === 0 && (
+          <>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: "56px", lineHeight: 1, marginBottom: "16px" }}>📦</div>
+              <s-stack direction="block" gap="small">
+                <s-heading>Bienvenido a SkuBeam</s-heading>
+                <s-text color="subdued">
+                  SkuBeam es tu centro de control de inventario para Shopify. Sincroniza tu stock
+                  con Bsale, migra desde WooCommerce y gestiona todos tus SKUs en un solo lugar.
+                </s-text>
+              </s-stack>
+            </div>
+
+            <s-stack direction="block" gap="small">
+              {[
+                "Sincronización bidireccional con Bsale",
+                "Migración desde WooCommerce",
+                "Alertas de stock crítico y forecasting",
+              ].map((bullet) => (
+                <div key={bullet} style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <span style={{ color: "var(--p-color-text-success, #008060)", fontWeight: 700, flexShrink: 0 }}>✓</span>
+                  <s-text>{bullet}</s-text>
+                </div>
+              ))}
+            </s-stack>
+
+            <s-button variant="primary" onClick={() => setScreen(1)}>
+              Comenzar configuración →
+            </s-button>
+          </>
+        )}
+
+        {/* ── Screen 1: WooCommerce ── */}
+        {screen === 1 && (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <s-text color="subdued">PASO 1 DE 2</s-text>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <div style={{ width: "32px", height: "4px", borderRadius: "2px", background: "var(--p-color-text-success, #008060)" }} />
+                <div style={{ width: "32px", height: "4px", borderRadius: "2px", background: "var(--p-color-bg-surface-secondary, #e4e5e7)" }} />
+              </div>
+            </div>
+
+            <s-stack direction="block" gap="small">
+              <s-heading>¿Tienes una tienda en WooCommerce?</s-heading>
+              <s-text color="subdued">
+                Podemos importar todos tus productos, variantes, imágenes y órdenes automáticamente.
+              </s-text>
+            </s-stack>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <button
+                style={CARD_BTN}
+                onClick={() => { navigate("/app/integrations/woocommerce"); setVisible(false); }}
+              >
+                <s-stack direction="block" gap="extraTight">
+                  <s-text type="strong">🛒 Sí, quiero migrar desde WooCommerce</s-text>
+                  <s-text color="subdued">Importa productos, variantes, imágenes y órdenes en minutos</s-text>
+                </s-stack>
+              </button>
+              <button
+                style={{ ...CARD_BTN, border: "2px solid transparent", background: "var(--p-color-bg-surface-secondary, #f6f6f7)" }}
+                onClick={() => setScreen(2)}
+              >
+                <s-text type="strong">No, continuar →</s-text>
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* ── Screen 2: Bsale ── */}
+        {screen === 2 && (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <s-text color="subdued">PASO 2 DE 2</s-text>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <div style={{ width: "32px", height: "4px", borderRadius: "2px", background: "var(--p-color-text-success, #008060)" }} />
+                <div style={{ width: "32px", height: "4px", borderRadius: "2px", background: "var(--p-color-text-success, #008060)" }} />
+              </div>
+            </div>
+
+            <s-stack direction="block" gap="small">
+              <s-heading>¿Usas Bsale como sistema de gestión?</s-heading>
+              <s-text color="subdued">
+                Conecta Bsale para sincronizar stock automáticamente en ambas direcciones.
+              </s-text>
+            </s-stack>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <button
+                style={CARD_BTN}
+                onClick={() => { navigate("/app/integrations/bsale"); setVisible(false); }}
+              >
+                <s-stack direction="block" gap="extraTight">
+                  <s-text type="strong">🔗 Sí, conectar Bsale</s-text>
+                  <s-text color="subdued">Sincronización bidireccional de stock entre Bsale y Shopify</s-text>
+                </s-stack>
+              </button>
+              <button
+                style={{ ...CARD_BTN, border: "2px solid transparent", background: "var(--p-color-bg-surface-secondary, #f6f6f7)" }}
+                onClick={closeAndComplete}
+              >
+                <s-text type="strong">No, solo gestionar inventario</s-text>
+              </button>
+            </div>
+
+            <button
+              onClick={() => setScreen(1)}
+              style={{ background: "none", border: "none", cursor: "pointer", padding: 0, textAlign: "left" }}
+            >
+              <s-text color="subdued">← Volver</s-text>
+            </button>
+          </>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { shopId, shop, kpis, abcCounts, criticalCount, attentionSkus } =
+  const { shopId, shop, kpis, abcCounts, criticalCount, attentionSkus, showOnboarding, hasBsale, hasWooConn, skuCount } =
     useLoaderData<typeof loader>();
 
   const navigate       = useSkuBeamNavigate();
@@ -246,6 +452,7 @@ export default function Dashboard() {
   const rotBadge       = kpis.turnover_ratio > 0 ? "últ. 30d" : "—";
 
   return (
+    <>
     <s-page heading="Dashboard">
 
       {/* ── Fila 1: KPI strip — auto-fit grid, naturally responsive ── */}
@@ -394,6 +601,10 @@ export default function Dashboard() {
       </s-section>
 
     </s-page>
+
+    {/* Onboarding overlay — rendered outside s-page so it covers everything */}
+    {showOnboarding && <OnboardingFlow navigate={navigate} />}
+  </>
   );
 }
 

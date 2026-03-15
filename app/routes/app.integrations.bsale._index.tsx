@@ -37,21 +37,40 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 // ── Action ────────────────────────────────────────────────────────────────────
 
 export const action = async ({ request }: ActionFunctionArgs) => {
+  console.log("[bsale-action] start");
+
   const { session } = await authenticate.admin(request);
   const shopId   = session.shop;
+  console.log("[bsale-action] shopId:", shopId);
+
   const formData = await request.formData();
   const intent   = formData.get("intent") as string;
+  const rawToken = formData.get("bsale_token");
+  console.log("[bsale-action] intent:", intent, "| bsale_token length:", String(rawToken ?? "").length);
+  console.log("[bsale-action] all formData keys:", [...formData.keys()]);
 
   if (intent === "save_token") {
-    const token = (formData.get("bsale_token") as string).trim();
+    const token = (rawToken as string | null)?.trim() ?? "";
+    console.log("[bsale-action] save_token branch | token present:", !!token, "| length:", token.length);
     if (!token) return { error: "El token no puede estar vacío." };
 
-    const { error } = await supabaseAdmin
+    console.log("[bsale-action] attempting supabase update for shop_id:", shopId);
+    const { error, data } = await supabaseAdmin
       .from("shops")
       .update({ bsale_token: token })
-      .eq("shop_id", shopId);
+      .eq("shop_id", shopId)
+      .select("shop_id, bsale_token");
+    console.log("[bsale-action] supabase result:", { error, rowsAffected: data?.length ?? 0, data });
 
-    if (error) return { error: `Error guardando token: ${error.message}` };
+    if (error) {
+      console.error("[bsale-action] supabase ERROR:", error);
+      return { error: `Error guardando token: ${error.message}` };
+    }
+    if (!data || data.length === 0) {
+      console.warn("[bsale-action] WARNING: update matched 0 rows — shop row missing for", shopId);
+      return { error: `No se encontró el registro del shop (shop_id: ${shopId}). Intenta re-instalar la app.` };
+    }
+    console.log("[bsale-action] token saved OK");
 
     // Auto-register Bsale webhook after saving the token
     const appUrl = process.env.APP_URL ?? "";
@@ -118,6 +137,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { jobId: job.id, jobType: "bsale_stock" as const };
   }
 
+  console.warn("[bsale-action] unknown intent:", intent);
   return { error: "Acción desconocida." };
 };
 
