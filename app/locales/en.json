@@ -1,0 +1,126 @@
+{
+  "nav": {
+    "home": "Home",
+    "skus": "SKUs",
+    "forecast": "Forecast",
+    "analytics": "Analytics",
+    "integrations": "Integrations",
+    "billing": "Plans"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "activeSkus": "Active SKUs",
+    "criticalSkus": "Critical SKUs",
+    "inventoryValue": "Inventory value",
+    "unitsSold": "Units sold 30d",
+    "rotation": "Turnover",
+    "bsaleStatus": "Bsale status",
+    "abcSummary": "ABC Summary",
+    "connectBsale": "Connect Bsale",
+    "syncNow": "Sync now",
+    "criticalSkusTitle": "SKUs that need attention",
+    "allGood": "All good",
+    "noCriticalSkus": "No active SKUs with critical stock"
+  },
+  "skus": {
+    "title": "SKUs",
+    "search": "Search SKUs...",
+    "all": "All SKUs",
+    "unpublished": "Unpublished",
+    "publish": "Publish",
+    "published": "✓ Published",
+    "publishAll": "Publish all",
+    "publishSelected": "Publish selected",
+    "exportCsv": "Export CSV",
+    "noSkus": "No SKUs registered",
+    "unpublishedBanner": "These SKUs are in SkuBeam but not in Shopify. They may come from a WooCommerce migration or were created manually."
+  },
+  "forecast": {
+    "title": "Forecast & Replenishment",
+    "daysOfStock": "Days of stock",
+    "reorderPoint": "Reorder point",
+    "suggestedOrder": "Suggested order",
+    "deadStock": "Dead stock",
+    "generatePO": "Generate purchase order"
+  },
+  "analytics": {
+    "title": "Analytics",
+    "abcAnalysis": "ABC Analysis",
+    "topSkus": "Top SKUs by velocity",
+    "totalSkus": "Total SKUs",
+    "totalValue": "Total value",
+    "avgVelocity": "Average velocity"
+  },
+  "integrations": {
+    "title": "Integrations",
+    "bsale": {
+      "title": "Bsale",
+      "description": "Automatically sync your inventory with Bsale",
+      "connect": "Connect",
+      "connected": "Connected",
+      "disconnect": "Disconnect",
+      "token": "Access token",
+      "tokenPlaceholder": "Paste your Bsale token here",
+      "save": "Save token",
+      "sync": "Sync now",
+      "lastSync": "Last sync",
+      "reviewDiff": "Review differences"
+    },
+    "woocommerce": {
+      "title": "WooCommerce",
+      "description": "Migrate your products and orders from WooCommerce",
+      "connect": "Connect store",
+      "analyze": "Analyze store",
+      "migrate": "Migrate now",
+      "preview": "Free preview",
+      "products": "products",
+      "orders": "orders"
+    }
+  },
+  "billing": {
+    "title": "Plans",
+    "currentPlan": "Your current plan",
+    "trial": "14 days free",
+    "select": "Select plan",
+    "plans": {
+      "starter": "Starter",
+      "growth": "Growth",
+      "pro": "Pro"
+    }
+  },
+  "onboarding": {
+    "welcome": "Welcome to SkuBeam! 👋",
+    "description": "SkuBeam is your inventory control center for Shopify.",
+    "start": "Start setup →",
+    "step": "Step {{current}} of {{total}}",
+    "wooQuestion": "Do you have a WooCommerce store?",
+    "wooYes": "Yes, I want to migrate from WooCommerce",
+    "wooNo": "No, continue →",
+    "bsaleQuestion": "Do you use Bsale as your management system?",
+    "bsaleYes": "Yes, connect Bsale",
+    "bsaleNo": "No, just manage inventory"
+  },
+  "common": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "loading": "Loading...",
+    "error": "Error",
+    "success": "Success",
+    "sync": "Sync",
+    "export": "Export",
+    "back": "Back",
+    "next": "Next",
+    "close": "Close",
+    "confirm": "Confirm",
+    "delete": "Delete",
+    "edit": "Edit",
+    "view": "View",
+    "status": {
+      "active": "Active",
+      "inactive": "Inactive",
+      "pending": "Pending",
+      "error": "Error",
+      "success": "Success"
+    }
+  }
+}

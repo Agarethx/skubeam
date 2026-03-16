@@ -2,6 +2,7 @@ import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useFetcher } from "react-router";
 import { useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { useTranslation } from 'react-i18next';
 import { authenticate } from "../shopify.server";
 import { getShop } from "../models/shop.server";
 import { getShopKpis, getAbcAnalysis } from "../models/analytics.server";
@@ -183,12 +184,14 @@ function AttentionTable({
   rows: (DashboardAttentionSku & { reorder_point: number | null })[];
   shopifyParams: string;
 }) {
+  const { t } = useTranslation();
+
   if (rows.length === 0) {
     return (
       <s-stack direction="block" gap="small">
-        <s-badge tone="success">Todo en orden</s-badge>
+        <s-badge tone="success">{t('dashboard.allGood')}</s-badge>
         <s-text color="subdued">
-          No hay SKUs activos con datos incompletos o stock bajo.
+          {t('dashboard.noCriticalSkus')}
         </s-text>
       </s-stack>
     );
@@ -263,6 +266,7 @@ function OnboardingFlow({
   const [screen, setScreen]     = useState<0 | 1 | 2>(0);
   const [visible, setVisible]   = useState(true);
   const completeFetcher         = useFetcher<{ ok?: boolean }>();
+  const { t } = useTranslation();
 
   function closeAndComplete() {
     completeFetcher.submit({}, { method: "post", action: "/api/complete-onboarding" });
@@ -321,10 +325,9 @@ function OnboardingFlow({
             <div style={{ textAlign: "center" }}>
               <div style={{ fontSize: "56px", lineHeight: 1, marginBottom: "16px" }}>📦</div>
               <s-stack direction="block" gap="small">
-                <s-heading>Bienvenido a SkuBeam</s-heading>
+                <s-heading>{t('onboarding.welcome')}</s-heading>
                 <s-text color="subdued">
-                  SkuBeam es tu centro de control de inventario para Shopify. Sincroniza tu stock
-                  con Bsale, migra desde WooCommerce y gestiona todos tus SKUs en un solo lugar.
+                  {t('onboarding.description')}
                 </s-text>
               </s-stack>
             </div>
@@ -343,7 +346,7 @@ function OnboardingFlow({
             </s-stack>
 
             <s-button variant="primary" onClick={() => setScreen(1)}>
-              Comenzar configuración →
+              {t('onboarding.start')}
             </s-button>
           </>
         )}
@@ -352,7 +355,7 @@ function OnboardingFlow({
         {screen === 1 && (
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <s-text color="subdued">PASO 1 DE 2</s-text>
+              <s-text color="subdued">{t('onboarding.step', { current: 1, total: 2 })}</s-text>
               <div style={{ display: "flex", gap: "6px" }}>
                 <div style={{ width: "32px", height: "4px", borderRadius: "2px", background: "var(--p-color-text-success, #008060)" }} />
                 <div style={{ width: "32px", height: "4px", borderRadius: "2px", background: "var(--p-color-bg-surface-secondary, #e4e5e7)" }} />
@@ -360,7 +363,7 @@ function OnboardingFlow({
             </div>
 
             <s-stack direction="block" gap="small">
-              <s-heading>¿Tienes una tienda en WooCommerce?</s-heading>
+              <s-heading>{t('onboarding.wooQuestion')}</s-heading>
               <s-text color="subdued">
                 Podemos importar todos tus productos, variantes, imágenes y órdenes automáticamente.
               </s-text>
@@ -372,7 +375,7 @@ function OnboardingFlow({
                 onClick={() => { navigate("/app/integrations/woocommerce"); setVisible(false); }}
               >
                 <s-stack direction="block" gap="small-200">
-                  <s-text type="strong">🛒 Sí, quiero migrar desde WooCommerce</s-text>
+                  <s-text type="strong">🛒 {t('onboarding.wooYes')}</s-text>
                   <s-text color="subdued">Importa productos, variantes, imágenes y órdenes en minutos</s-text>
                 </s-stack>
               </button>
@@ -380,7 +383,7 @@ function OnboardingFlow({
                 style={{ ...CARD_BTN, border: "2px solid transparent", background: "var(--p-color-bg-surface-secondary, #f6f6f7)" }}
                 onClick={() => setScreen(2)}
               >
-                <s-text type="strong">No, continuar →</s-text>
+                <s-text type="strong">{t('onboarding.wooNo')}</s-text>
               </button>
             </div>
           </>
@@ -390,7 +393,7 @@ function OnboardingFlow({
         {screen === 2 && (
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <s-text color="subdued">PASO 2 DE 2</s-text>
+              <s-text color="subdued">{t('onboarding.step', { current: 2, total: 2 })}</s-text>
               <div style={{ display: "flex", gap: "6px" }}>
                 <div style={{ width: "32px", height: "4px", borderRadius: "2px", background: "var(--p-color-text-success, #008060)" }} />
                 <div style={{ width: "32px", height: "4px", borderRadius: "2px", background: "var(--p-color-text-success, #008060)" }} />
@@ -398,7 +401,7 @@ function OnboardingFlow({
             </div>
 
             <s-stack direction="block" gap="small">
-              <s-heading>¿Usas Bsale como sistema de gestión?</s-heading>
+              <s-heading>{t('onboarding.bsaleQuestion')}</s-heading>
               <s-text color="subdued">
                 Conecta Bsale para sincronizar stock automáticamente en ambas direcciones.
               </s-text>
@@ -410,7 +413,7 @@ function OnboardingFlow({
                 onClick={() => { navigate("/app/integrations/bsale"); setVisible(false); }}
               >
                 <s-stack direction="block" gap="small-200">
-                  <s-text type="strong">🔗 Sí, conectar Bsale</s-text>
+                  <s-text type="strong">🔗 {t('onboarding.bsaleYes')}</s-text>
                   <s-text color="subdued">Sincronización bidireccional de stock entre Bsale y Shopify</s-text>
                 </s-stack>
               </button>
@@ -418,7 +421,7 @@ function OnboardingFlow({
                 style={{ ...CARD_BTN, border: "2px solid transparent", background: "var(--p-color-bg-surface-secondary, #f6f6f7)" }}
                 onClick={closeAndComplete}
               >
-                <s-text type="strong">No, solo gestionar inventario</s-text>
+                <s-text type="strong">{t('onboarding.bsaleNo')}</s-text>
               </button>
             </div>
 
@@ -426,7 +429,7 @@ function OnboardingFlow({
               onClick={() => setScreen(1)}
               style={{ background: "none", border: "none", cursor: "pointer", padding: 0, textAlign: "left" }}
             >
-              <s-text color="subdued">← Volver</s-text>
+              <s-text color="subdued">← {t('common.back')}</s-text>
             </button>
           </>
         )}
@@ -444,6 +447,7 @@ export default function Dashboard() {
 
   const navigate       = useSkuBeamNavigate();
   const shopifyParams  = useShopifyParams();
+  const { t } = useTranslation();
   const bsaleConnected = Boolean(shop?.bsale_token);
 
   // Short badge labels — avoid truncation inside narrow cards
@@ -453,7 +457,7 @@ export default function Dashboard() {
 
   return (
     <>
-    <s-page heading="Dashboard">
+    <s-page heading={t('dashboard.title')}>
 
       {/* ── Fila 1: KPI strip — auto-fit grid, naturally responsive ── */}
       <s-section>
@@ -462,27 +466,27 @@ export default function Dashboard() {
           gap="base"
         >
           <KpiCard
-            label="SKUs activos"
+            label={t('dashboard.activeSkus')}
             value={kpis.active_skus.toLocaleString("es-CL")}
           />
           <KpiCard
-            label="SKUs críticos"
+            label={t('dashboard.criticalSkus')}
             value={criticalCount.toLocaleString("es-CL")}
             badgeTone={criticalCount > 0 ? "critical" : "success"}
             badge={criticalBadge}
           />
           <KpiCard
-            label="Valor inventario"
+            label={t('dashboard.inventoryValue')}
             value={fmtCurrency(kpis.estimated_stock_value)}
             badgeTone={kpis.skus_with_cost > 0 ? "neutral" : "neutral"}
             badge={costBadge}
           />
           <KpiCard
-            label="Unidades vend. 30d"
+            label={t('dashboard.unitsSold')}
             value={kpis.units_sold_30d.toLocaleString("es-CL")}
           />
           <KpiCard
-            label="Rotación"
+            label={t('dashboard.rotation')}
             value={fmtRatio(kpis.turnover_ratio)}
             badgeTone={kpis.turnover_ratio > 0 ? "info" : "neutral"}
             badge={rotBadge}
@@ -491,7 +495,7 @@ export default function Dashboard() {
       </s-section>
 
       {/* ── Fila 2 left: SKUs que necesitan atención ── */}
-      <s-section heading="SKUs que necesitan atención">
+      <s-section heading={t('dashboard.criticalSkusTitle')}>
         <AttentionTable rows={attentionSkus} shopifyParams={shopifyParams} />
         {attentionSkus.length > 0 && (
           <s-button variant="tertiary" onClick={() => navigate("/app/skus")}>
@@ -556,18 +560,18 @@ export default function Dashboard() {
       )}
 
       {/* ── Fila 2 right: Estado Bsale (aside) ── */}
-      <s-section slot="aside" heading="Estado Bsale">
+      <s-section slot="aside" heading={t('dashboard.bsaleStatus')}>
         <s-stack direction="block" gap="base">
           {bsaleConnected ? (
             <>
-              <s-badge tone="success">Conectado ✓</s-badge>
+              <s-badge tone="success">{t('integrations.bsale.connected')} ✓</s-badge>
               <s-stack direction="block" gap="small">
-                <s-text color="subdued">Último sync</s-text>
+                <s-text color="subdued">{t('integrations.bsale.lastSync')}</s-text>
                 <s-text>{fmtDate(shop?.bsale_last_sync)}</s-text>
               </s-stack>
               <s-text color="subdued">{shopId}</s-text>
               <s-button variant="secondary" onClick={() => navigate("/app/integrations")}>
-                Sync ahora
+                {t('dashboard.syncNow')}
               </s-button>
             </>
           ) : (
@@ -578,7 +582,7 @@ export default function Dashboard() {
                 {shop?.sku_limit === -1 ? "∞" : (shop?.sku_limit ?? 500)} SKUs
               </s-text>
               <s-button variant="primary" onClick={() => navigate("/app/integrations")}>
-                Conectar Bsale
+                {t('dashboard.connectBsale')}
               </s-button>
             </>
           )}
@@ -586,7 +590,7 @@ export default function Dashboard() {
       </s-section>
 
       {/* ── Fila 2 right: Resumen ABC (aside) ── */}
-      <s-section slot="aside" heading="Resumen ABC">
+      <s-section slot="aside" heading={t('dashboard.abcSummary')}>
         <s-stack direction="block" gap="base">
           <s-stack direction="inline" gap="small">
             <s-badge tone="success">{abcCounts.A} tipo A</s-badge>

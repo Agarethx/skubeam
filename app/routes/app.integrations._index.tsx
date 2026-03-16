@@ -1,6 +1,7 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { useTranslation } from 'react-i18next';
 import { authenticate } from "../shopify.server";
 import { supabaseAdmin } from "../db.server";
 import { useSkuBeamNavigate } from "../lib/navigate";
@@ -44,12 +45,7 @@ const STATUS_TONE: Record<Status, "success" | "warning" | "neutral" | "caution">
   soon:         "caution",
 };
 
-const STATUS_LABEL: Record<Status, string> = {
-  connected:    "Conectado",
-  disconnected: "No conectado",
-  available:    "Disponible",
-  soon:         "Próximamente",
-};
+// STATUS_LABEL is now handled dynamically via i18n in IntegrationCard
 
 function IntegrationCard({
   def,
@@ -58,8 +54,16 @@ function IntegrationCard({
   def: IntegrationDef;
   onConfigure: () => void;
 }) {
+  const { t } = useTranslation();
   const canConnect = def.status === "connected" || def.status === "available" || def.status === "disconnected";
-  const btnLabel = def.status === "connected" ? "Configurar" : def.status === "soon" ? "Próximamente" : "Conectar";
+  const btnLabel = def.status === "connected" ? "Configurar" : def.status === "soon" ? "Próximamente" : t('integrations.bsale.connect');
+
+  const STATUS_LABEL: Record<Status, string> = {
+    connected:    t('integrations.bsale.connected'),
+    disconnected: "No conectado",
+    available:    "Disponible",
+    soon:         "Próximamente",
+  };
 
   return (
     <div
@@ -150,13 +154,14 @@ function IntegrationCard({
 export default function IntegrationsIndex() {
   const { bsaleConnected } = useLoaderData<typeof loader>();
   const navigate = useSkuBeamNavigate();
+  const { t } = useTranslation();
 
   const integrations: IntegrationDef[] = [
     {
       key:         "bsale",
-      name:        "Bsale",
+      name:        t('integrations.bsale.title'),
       category:    "ERP y facturación · Chile",
-      description: "Sincroniza productos, stock e inventario con tu Bsale. Sync bidireccional en tiempo real: ventas en Shopify descuentan en Bsale y viceversa.",
+      description: t('integrations.bsale.description'),
       color:       "#1B72BE",
       initial:     "B",
       route:       "/app/integrations/bsale",
@@ -164,9 +169,9 @@ export default function IntegrationsIndex() {
     },
     {
       key:         "woocommerce",
-      name:        "WooCommerce",
+      name:        t('integrations.woocommerce.title'),
       category:    "Migración desde WordPress",
-      description: "Importa tu catálogo completo de productos, variantes y stock desde cualquier tienda WooCommerce. Incluye historial de órdenes para forecast.",
+      description: t('integrations.woocommerce.description'),
       color:       "#7F54B3",
       initial:     "W",
       route:       "/app/integrations/woocommerce",
@@ -205,7 +210,7 @@ export default function IntegrationsIndex() {
   ];
 
   return (
-    <s-page heading="Integraciones">
+    <s-page heading={t('integrations.title')}>
       <s-section heading="Conecta tus sistemas">
         <s-stack direction="block" gap="small">
           <s-text color="subdued">

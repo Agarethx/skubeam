@@ -13,6 +13,7 @@ import {
 } from "react-router";
 import { useEffect, useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { useTranslation } from 'react-i18next';
 import { authenticate } from "../shopify.server";
 import { useShopifyParams } from "../lib/navigate";
 import { listSkus, listUnpublishedSkus, getUnpublishedCount } from "../models/sku.server";
@@ -137,6 +138,7 @@ function UnpublishedSkuRow({
   onPublished: (id: string) => void;
 }) {
   const fetcher = useFetcher<{ success?: boolean; error?: string }>();
+  const { t } = useTranslation();
 
   useEffect(() => {
     if (fetcher.data?.success) onPublished(sku.id);
@@ -168,9 +170,9 @@ function UnpublishedSkuRow({
       </span>
       <span>
         {published ? (
-          <s-badge tone="success">✓ Publicado</s-badge>
+          <s-badge tone="success">{t('skus.published')}</s-badge>
         ) : fetcher.data?.error ? (
-          <s-badge tone="critical">Error</s-badge>
+          <s-badge tone="critical">{t('common.error')}</s-badge>
         ) : (
           <fetcher.Form method="post" action="/api/publish-sku">
             <input type="hidden" name="sku_id" value={sku.id} />
@@ -179,7 +181,7 @@ function UnpublishedSkuRow({
               variant="secondary"
               {...(isPublishing ? { loading: true } : {})}
             >
-              Publicar
+              {t('skus.publish')}
             </s-button>
           </fetcher.Form>
         )}
@@ -197,6 +199,7 @@ export default function SkusIndex() {
   const navigation    = useNavigation();
   const navigate      = useNavigate();
   const shopifyParams = useShopifyParams();
+  const { t } = useTranslation();
   const [localSearch, setLocalSearch] = useState(search);
   const [hiddenIds, setHiddenIds]     = useState<Set<string>>(new Set());
   const { revalidate }                = useRevalidator();
@@ -253,20 +256,20 @@ export default function SkusIndex() {
   });
 
   return (
-    <s-page heading="SKUs">
+    <s-page heading={t('skus.title')}>
       {activeSyncJob && <SyncProgressBanner job={activeSyncJob as SyncJob} />}
 
       {/* ── Tab navigation ── */}
       <s-section>
         <div style={{ display: "flex", gap: "0", borderBottom: "1px solid var(--p-color-border, #e1e3e5)" }}>
           <button style={TAB_STYLE(tab !== "unpublished")} onClick={() => navigate("?")}>
-            Todos los SKUs
+            {t('skus.all')}
           </button>
           <button
             style={TAB_STYLE(tab === "unpublished")}
             onClick={() => navigate("?tab=unpublished")}
           >
-            Sin publicar{unpublishedCount > 0 ? ` (${unpublishedCount})` : ""}
+            {t('skus.unpublished')}{unpublishedCount > 0 ? ` (${unpublishedCount})` : ""}
           </button>
         </div>
       </s-section>
@@ -277,8 +280,7 @@ export default function SkusIndex() {
           <s-stack direction="block" gap="base">
             <s-banner tone="info">
               <s-paragraph>
-                Estos SKUs están en SkuBeam pero no en Shopify. Pueden venir de una migración
-                WooCommerce o haber sido creados manualmente.
+                {t('skus.unpublishedBanner')}
               </s-paragraph>
             </s-banner>
 
@@ -368,7 +370,7 @@ export default function SkusIndex() {
                 )
               }
             >
-              Exportar CSV
+              {t('skus.exportCsv')}
             </s-button>
           </s-stack>
         </s-section>

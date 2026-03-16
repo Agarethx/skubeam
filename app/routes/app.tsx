@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import { useAppBridge } from "@shopify/app-bridge-react";
+import { useTranslation } from 'react-i18next';
 import { authenticate } from "../shopify.server";
 import { upsertShop } from "../models/shop.server";
 
@@ -16,6 +17,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 function AppLayout() {
   const shopify = useAppBridge();
   const navigation = useNavigation();
+  const { t } = useTranslation();
 
   // Clear the App Bridge loading indicator once the route transition settles.
   // useSkuBeamNavigate() calls shopify.loading(true) before navigating;
@@ -29,12 +31,12 @@ function AppLayout() {
   return (
     <>
       <s-app-nav>
-        <s-link href="/app">Home</s-link>
-        <s-link href="/app/skus">SKUs</s-link>
-        <s-link href="/app/forecast">Forecast</s-link>
-        <s-link href="/app/analytics">Analytics</s-link>
-        <s-link href="/app/integrations">Integraciones</s-link>
-        <s-link href="/app/billing">Planes</s-link>
+        <s-link href="/app">{t('nav.home')}</s-link>
+        <s-link href="/app/skus">{t('nav.skus')}</s-link>
+        <s-link href="/app/forecast">{t('nav.forecast')}</s-link>
+        <s-link href="/app/analytics">{t('nav.analytics')}</s-link>
+        <s-link href="/app/integrations">{t('nav.integrations')}</s-link>
+        <s-link href="/app/billing">{t('nav.billing')}</s-link>
       </s-app-nav>
       <Outlet />
     </>
