@@ -100,6 +100,26 @@
     "bsaleYes": "Yes, connect Bsale",
     "bsaleNo": "No, just manage inventory"
   },
+  "features": {
+    "requiredPlan": "{{plan}} Plan (${{price}}/month)",
+    "upgradeCta": "View plans and upgrade",
+    "multiLocation": {
+      "title": "Multi-location Inventory",
+      "description": "Manage stock across all your locations in real time. Automatically sync with Bsale by warehouse."
+    },
+    "aiAssistant": {
+      "title": "SkuBeam AI Assistant",
+      "description": "Query your inventory in natural language and receive proactive stock alerts automatically."
+    },
+    "multiErp": {
+      "title": "Advanced ERP Integrations",
+      "description": "Connect Defontana, Facto, CONTPAQi and other ERPs directly with your Shopify inventory."
+    },
+    "apiAccess": {
+      "title": "API Access",
+      "description": "Integrate SkuBeam with your own systems via REST API."
+    }
+  },
   "common": {
     "save": "Save",
     "cancel": "Cancel",
