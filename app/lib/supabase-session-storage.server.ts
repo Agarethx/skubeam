@@ -26,6 +26,7 @@ export class SupabaseSessionStorage implements SessionStorage {
           expires: session.expires?.toISOString() ?? null,
           access_token: session.accessToken,
           user_id:
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (session as any).onlineAccessInfo?.associated_user?.id?.toString() ??
             null,
         },

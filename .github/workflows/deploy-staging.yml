@@ -1,0 +1,32 @@
+name: Deploy Staging
+on:
+  push:
+    branches: [develop]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test
+      - run: npm run build
+      - name: Deploy to Railway Staging
+        run: |
+          npm install -g @railway/cli
+          railway up --service skubeam
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_STAGING }}
+      - name: Run Supabase migrations staging
+        run: |
+          npx supabase link --project-ref krjszvvrsnhzauanevuu
+          npx supabase db push --yes
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

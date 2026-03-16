@@ -111,7 +111,6 @@ async function wooFetch<T>(
   path: string,
   params: Record<string, string> = {},
 ): Promise<{ data: T; total: number }> {
-  const qs = new URLSearchParams({ ...params, consumer_key: "", consumer_secret: "" });
   // Use Authorization header instead of query params (safer)
   const url = new URL(`${creds.url}/wp-json/wc/v3${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
@@ -178,6 +177,7 @@ export async function getVariations(
   const perPage = 100;
   let page = 1;
   const all: WooVariation[] = [];
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     const { data, total } = await wooFetch<WooVariation[]>(
       creds,

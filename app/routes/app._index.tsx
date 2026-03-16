@@ -371,7 +371,7 @@ function OnboardingFlow({
                 style={CARD_BTN}
                 onClick={() => { navigate("/app/integrations/woocommerce"); setVisible(false); }}
               >
-                <s-stack direction="block" gap="extraTight">
+                <s-stack direction="block" gap="small-200">
                   <s-text type="strong">🛒 Sí, quiero migrar desde WooCommerce</s-text>
                   <s-text color="subdued">Importa productos, variantes, imágenes y órdenes en minutos</s-text>
                 </s-stack>
@@ -409,7 +409,7 @@ function OnboardingFlow({
                 style={CARD_BTN}
                 onClick={() => { navigate("/app/integrations/bsale"); setVisible(false); }}
               >
-                <s-stack direction="block" gap="extraTight">
+                <s-stack direction="block" gap="small-200">
                   <s-text type="strong">🔗 Sí, conectar Bsale</s-text>
                   <s-text color="subdued">Sincronización bidireccional de stock entre Bsale y Shopify</s-text>
                 </s-stack>
@@ -439,7 +439,7 @@ function OnboardingFlow({
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { shopId, shop, kpis, abcCounts, criticalCount, attentionSkus, showOnboarding, hasBsale, hasWooConn, skuCount } =
+  const { shopId, shop, kpis, abcCounts, criticalCount, attentionSkus, showOnboarding } =
     useLoaderData<typeof loader>();
 
   const navigate       = useSkuBeamNavigate();

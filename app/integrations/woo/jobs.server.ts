@@ -5,7 +5,6 @@ import {
   paginateOrders,
   getVariations,
   type WooCredentials,
-  type WooProduct,
   type WooSimpleProduct,
   type WooVariableProduct,
   type WooVariation,

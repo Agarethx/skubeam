@@ -48,6 +48,7 @@ export async function paginate<T>(
   let offset = 0;
   const limit = 50;
 
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     const qs = new URLSearchParams({
       ...params,

@@ -178,6 +178,7 @@ async function fetchAllShopifyVariants(admin: AdminClient): Promise<ShopifyVaria
   const all: ShopifyVariantNode[] = [];
   let cursor: string | null = null;
 
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     const res  = await admin.graphql(
       `#graphql
