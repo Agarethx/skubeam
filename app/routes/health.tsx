@@ -1,9 +1,6 @@
 export async function loader() {
-  return new Response(
-    JSON.stringify({ status: "ok", timestamp: new Date().toISOString() }),
-    {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    }
-  );
+  return new Response('{"status":"ok"}', {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
 }
