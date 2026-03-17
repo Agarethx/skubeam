@@ -3,21 +3,21 @@ import { useLoaderData, useActionData, Form, useNavigation } from "react-router"
 import { authenticate } from "../shopify.server";
 import { safeRedirect } from "../lib/server";
 import { PLANS, PLAN_FEATURES } from "../lib/plans";
-import { createSubscription } from "../lib/billing.server";
-import { getShop } from "../models/shop.server";
+import { checkBilling, createSubscription } from "../lib/billing.server";
 
 // ── Loader ────────────────────────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
-  const shop = await getShop(session.shop);
+  const { admin } = await authenticate.admin(request);
+  const billing   = await checkBilling(admin);
 
   const url        = new URL(request.url);
   const success    = url.searchParams.get("success") === "1";
   const errorParam = url.searchParams.get("error");
 
   return {
-    currentPlan: (shop?.plan ?? "trial") as string,
+    currentPlan: billing?.plan ?? "trial",
+    features:    billing?.features ?? null,
     success,
     errorParam,
   };

@@ -1,10 +1,17 @@
 import { supabaseAdmin } from "../db.server";
 import { PLANS, SKU_LIMITS } from "./plans";
 import type { PlanKey } from "./plans";
+import { PLAN_FEATURES as FEATURE_FLAGS } from "./features";
+import type { PlanFeatures } from "./features";
 
 // Re-export so existing imports of billing.server keep working
 export { PLANS, SKU_LIMITS } from "./plans";
 export type { PlanKey } from "./plans";
+
+export type BillingResult = {
+  plan: PlanKey;
+  features: PlanFeatures;
+};
 
 // ── Internal admin client type ────────────────────────────────────────────────
 
@@ -91,13 +98,18 @@ export function planNameToKey(name: string): PlanKey | null {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Returns the active plan key ("starter" | "growth" | "pro") or null
- * if the shop has no active paid subscription.
+ * Returns the active plan key and its feature set, or null if the shop
+ * has no active paid subscription.
  */
-export async function checkBilling(admin: AdminClient): Promise<PlanKey | null> {
+export async function checkBilling(admin: AdminClient): Promise<BillingResult | null> {
   const sub = await getActiveSubscription(admin);
   if (!sub) return null;
-  return planNameToKey(sub.name);
+  const plan = planNameToKey(sub.name);
+  if (!plan) return null;
+  return {
+    plan,
+    features: FEATURE_FLAGS[plan] ?? FEATURE_FLAGS.starter,
+  };
 }
 
 /**

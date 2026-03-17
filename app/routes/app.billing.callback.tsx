@@ -18,13 +18,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // checkBilling queries currentAppInstallation.activeSubscriptions — the
   // subscription is already ACTIVE by the time Shopify redirects here.
-  const planKey = await checkBilling(admin);
+  const billing = await checkBilling(admin);
 
-  if (planKey) {
-    await activatePlanInSupabase(session.shop, planKey);
+  if (billing) {
+    await activatePlanInSupabase(session.shop, billing.plan);
   }
 
-  const destination = planKey
+  const destination = billing
     ? "/app/billing?success=1"
     : "/app/billing?error=not_approved";
 
