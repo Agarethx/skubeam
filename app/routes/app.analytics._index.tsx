@@ -7,8 +7,10 @@ import {
   getShopKpis,
   getAbcAnalysis,
   getTopSkusByVelocity,
+  getSalesByChannel,
 } from "../models/analytics.server";
 import type { VelocityRow } from "../models/analytics.server";
+import { supabaseAdmin } from "../db.server";
 
 const ABC_PAGE_SIZE = 50;
 const ABC_GRID = "50px 140px 1fr 110px 90px 140px";
@@ -23,11 +25,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const abcPage = Math.max(1, Number(url.searchParams.get("abcPage") ?? "1"));
 
-  const [kpis, allAbcRows, velocityRows] = await Promise.all([
+  const [kpis, allAbcRows, velocityRows, channelData, shopRow] = await Promise.all([
     getShopKpis(shopId),
     getAbcAnalysis(shopId),
     getTopSkusByVelocity(shopId, 20),
+    getSalesByChannel(shopId, 30),
+    supabaseAdmin.from("shops").select("bsale_token").eq("shop_id", shopId).maybeSingle(),
   ]);
+
+  const hasBsale = !!(shopRow.data?.bsale_token);
 
   const abcCounts = {
     A: allAbcRows.filter((r) => r.abc_class === "A").length,
@@ -39,7 +45,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const abcTotalPages = Math.ceil(abcTotal / ABC_PAGE_SIZE);
   const abcRows       = allAbcRows.slice((abcPage - 1) * ABC_PAGE_SIZE, abcPage * ABC_PAGE_SIZE);
 
-  return { kpis, abcRows, abcTotal, abcPage, abcTotalPages, abcCounts, velocityRows };
+  return { kpis, abcRows, abcTotal, abcPage, abcTotalPages, abcCounts, velocityRows, channelData, hasBsale };
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -248,7 +254,7 @@ function VelocityRow_({
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function AnalyticsPage() {
-  const { kpis, abcRows, abcTotal, abcPage, abcTotalPages, abcCounts, velocityRows } =
+  const { kpis, abcRows, abcTotal, abcPage, abcTotalPages, abcCounts, velocityRows, channelData, hasBsale } =
     useLoaderData<typeof loader>();
 
   const navigate      = useNavigate();
@@ -266,6 +272,14 @@ export default function AnalyticsPage() {
 
   return (
     <s-page heading="Analytics">
+
+      {/* Bsale channel breakdown */}
+      {hasBsale && channelData.bsale_pos > 0 && (
+        <s-banner tone="info">
+          El forecast incluye ventas de tienda física via Bsale.
+          Online: {fmtNum(channelData.shopify)} uds · Tienda: {fmtNum(channelData.bsale_pos)} uds (últimos 30 días)
+        </s-banner>
+      )}
 
       {/* Cost coverage warning */}
       {showCostWarning && (

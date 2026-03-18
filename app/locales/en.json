@@ -4,8 +4,16 @@
     "skus": "SKUs",
     "forecast": "Forecast",
     "analytics": "Analytics",
+    "assistant": "AI Assistant",
     "integrations": "Integrations",
     "billing": "Plans"
+  },
+  "assistant": {
+    "title": "SkuBeam AI Assistant",
+    "greeting": "👋 Hi! I'm your inventory assistant",
+    "subtitle": "I can answer questions about your stock, sales and replenishment in real time.",
+    "placeholder": "Type your question...",
+    "send": "Send"
   },
   "dashboard": {
     "title": "Dashboard",

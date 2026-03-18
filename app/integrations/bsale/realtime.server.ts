@@ -56,23 +56,29 @@ export interface BsaleNotification {
   resource:   string;
 }
 
-// ── Bsale full document (fetched via GET /documents/{id}.json?expand=[details]) ──
+// ── Bsale full document (fetched via GET /documents/{id}.json?expand=[details,documentType]) ──
 
 interface BsaleDetailItem {
-  id:        number;
-  quantity:  number;
-  variantId?: number;
-  variant?:  { id: number };
+  id:           number;
+  quantity:     number;
+  totalAmount?: number;
+  variantId?:   number;
+  variant?:     { id: number; code?: string };
 }
 
 interface BsaleFullDocument {
-  id:       number;
-  officeId?: number;
+  id:             number;
+  officeId?:      number;
+  emissionDate?:  number; // Unix timestamp
+  document_type?: { id: number; codeSii?: number };
   details?: {
     href?:  string;
     items?: BsaleDetailItem[];
   };
 }
+
+// Bsale SII codes that represent a sale (factura, boleta y variantes)
+const SALE_DOCUMENT_CODES = [33, 34, 39, 41];
 
 // ── Idempotency helpers ───────────────────────────────────────────────────────
 
@@ -216,7 +222,7 @@ export async function handleBsaleDocumentAdd(
 
   // Fetch the full document — the webhook notification only carries resourceId
   const doc = await get<BsaleFullDocument>(
-    `/documents/${documentId}.json?expand=[details]`,
+    `/documents/${documentId}.json?expand=[details,documentType]`,
     token,
   );
 
@@ -400,6 +406,89 @@ export async function handleBsaleDocumentAdd(
     );
   }
 
+  // Register sale in sales_history if this document is a sale (non-blocking)
+  if (SALE_DOCUMENT_CODES.includes(doc.document_type?.codeSii ?? -1)) {
+    await recordBsaleSale(shopId, token, doc);
+  }
+
   await refreshSkuAnalytics();
   await markProcessed(shopId, "bsale", `doc_${documentId}`);
+}
+
+// ── recordBsaleSale ───────────────────────────────────────────────────────────
+
+async function recordBsaleSale(
+  shopId: string,
+  token:  string,
+  doc:    BsaleFullDocument,
+): Promise<void> {
+  try {
+    // Fetch details with variant expansion to get sku_code
+    const detailsResp = await get<{ items?: BsaleDetailItem[] }>(
+      `/documents/${doc.id}/details.json?expand=variant`,
+      token,
+    );
+
+    const items = detailsResp.items ?? [];
+    if (items.length === 0) return;
+
+    // Collect distinct sku_codes to look up sku_id
+    const skuCodes = [...new Set(
+      items.map((d) => d.variant?.code).filter((c): c is string => !!c),
+    )];
+
+    if (skuCodes.length === 0) {
+      console.log(`[bsale-sales] No variant codes in document ${doc.id} — skip`);
+      return;
+    }
+
+    const { data: skus } = await supabaseAdmin
+      .from("skus")
+      .select("id, sku_code")
+      .eq("shop_id", shopId)
+      .in("sku_code", skuCodes);
+
+    const skuIdMap = new Map<string, string>();
+    for (const s of skus ?? []) {
+      skuIdMap.set(s.sku_code, s.id);
+    }
+
+    const soldAt = doc.emissionDate
+      ? new Date(doc.emissionDate * 1000).toISOString()
+      : new Date().toISOString();
+
+    const salesRows = items
+      .filter((d) => d.variant?.code && skuIdMap.has(d.variant.code))
+      .map((d) => ({
+        shop_id:           shopId,
+        sku_id:            skuIdMap.get(d.variant!.code!)!,
+        sku_code:          d.variant!.code!,
+        quantity_sold:     Math.abs(d.quantity),
+        revenue:           d.totalAmount ?? 0,
+        sold_at:           soldAt,
+        channel:           "bsale_pos",
+        bsale_document_id: String(doc.id),
+      }));
+
+    if (salesRows.length === 0) {
+      console.log(`[bsale-sales] No matching SKUs for document ${doc.id} — skip`);
+      return;
+    }
+
+    const { error } = await supabaseAdmin
+      .from("sales_history")
+      .upsert(salesRows, {
+        onConflict:       "shop_id,bsale_document_id,sku_code",
+        ignoreDuplicates: true,
+      });
+
+    if (error) {
+      console.error("[bsale-sales] Error recording sale:", error);
+    } else {
+      console.log(`[bsale-sales] Recorded ${salesRows.length} sale lines from document ${doc.id}`);
+    }
+  } catch (e) {
+    // Non-fatal — stock sync already processed; sales history is a best-effort improvement
+    console.error("[bsale-sales] Non-fatal error recording sale:", e);
+  }
 }

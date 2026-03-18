@@ -35,6 +35,7 @@ function AppLayout() {
         <s-link href="/app/skus">{t('nav.skus')}</s-link>
         <s-link href="/app/forecast">{t('nav.forecast')}</s-link>
         <s-link href="/app/analytics">{t('nav.analytics')}</s-link>
+        <s-link href="/app/assistant">{t('nav.assistant')}</s-link>
         <s-link href="/app/integrations">{t('nav.integrations')}</s-link>
         <s-link href="/app/billing">{t('nav.billing')}</s-link>
       </s-app-nav>

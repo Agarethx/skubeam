@@ -134,6 +134,40 @@ export async function getAbcAnalysis(shopId: string): Promise<AbcRow[]> {
   });
 }
 
+// ── getSalesByChannel ─────────────────────────────────────────────────────────
+
+export interface SalesByChannel {
+  shopify:   number;
+  bsale_pos: number;
+  total:     number;
+}
+
+export async function getSalesByChannel(
+  shopId: string,
+  days = 30,
+): Promise<SalesByChannel> {
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+
+  const { data } = await supabaseAdmin
+    .from("sales_history")
+    .select("channel, quantity_sold")
+    .eq("shop_id", shopId)
+    .gte("sold_at", since.toISOString());
+
+  if (!data?.length) return { shopify: 0, bsale_pos: 0, total: 0 };
+
+  const shopify = data
+    .filter((s) => s.channel === "shopify" || !s.channel)
+    .reduce((sum, s) => sum + (s.quantity_sold ?? 0), 0);
+
+  const bsale_pos = data
+    .filter((s) => s.channel === "bsale_pos")
+    .reduce((sum, s) => sum + (s.quantity_sold ?? 0), 0);
+
+  return { shopify, bsale_pos, total: shopify + bsale_pos };
+}
+
 // ── getTopSkusByVelocity ──────────────────────────────────────────────────────
 
 export async function getTopSkusByVelocity(
