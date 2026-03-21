@@ -65,6 +65,29 @@ export async function paginate<T>(
   return all;
 }
 
+/** POST request to Bsale — used for creating documents and other resources. */
+export async function post<T>(path: string, token: string, body: unknown): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25_000);
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      method:  "POST",
+      headers: headers(token),
+      body:    JSON.stringify(body),
+      signal:  controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    throw new Error(`Bsale POST ${path}: ${res.status} ${res.statusText}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 /** PUT request to Bsale — used for stock adjustments. */
 export async function put<T>(path: string, token: string, body: unknown): Promise<T> {
   const controller = new AbortController();

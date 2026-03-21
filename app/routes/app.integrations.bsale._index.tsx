@@ -17,20 +17,31 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopId = session.shop;
 
-  const [shopRow, activeJob] = await Promise.all([
+  const [shopRow, activeJob, recentBoletas] = await Promise.all([
     supabaseAdmin
       .from("shops")
-      .select("bsale_token, bsale_last_sync")
+      .select("bsale_token, bsale_last_sync, active_addons")
       .eq("shop_id", shopId)
       .single()
       .then(({ data }) => data),
     getActiveBsaleJob(shopId),
+    supabaseAdmin
+      .from("bsale_documents")
+      .select("shopify_order_id, bsale_document_id, status, url_pdf, total_amount, created_at")
+      .eq("shop_id", shopId)
+      .order("created_at", { ascending: false })
+      .limit(5)
+      .then(({ data }) => data ?? []),
   ]);
+
+  const hasAddon = shopRow?.active_addons?.includes("bsale_documents") ?? false;
 
   return {
     hasToken:      !!shopRow?.bsale_token,
     bsaleLastSync: shopRow?.bsale_last_sync ?? null,
     activeJob,
+    hasAddon,
+    recentBoletas,
   };
 };
 
@@ -171,7 +182,7 @@ const INPUT_STYLE: React.CSSProperties = {
 // ── UI ────────────────────────────────────────────────────────────────────────
 
 export default function BsaleIntegrationPage() {
-  const { hasToken, bsaleLastSync, activeJob } = useLoaderData<typeof loader>();
+  const { hasToken, bsaleLastSync, activeJob, hasAddon, recentBoletas } = useLoaderData<typeof loader>();
   const navigation  = useNavigation();
   const revalidator = useRevalidator();
   const navigate    = useSkuBeamNavigate();
@@ -444,6 +455,109 @@ export default function BsaleIntegrationPage() {
           </s-box>
 
         </s-grid>
+      </s-section>
+
+      {/* ── Boleta electrónica add-on ── */}
+      <s-section heading="Boleta electrónica automática">
+        {hasAddon ? (
+          <s-stack direction="block" gap="base">
+            <s-banner tone="success" heading="Add-on activo — se emite una boleta por cada venta en Shopify." />
+            {recentBoletas.length === 0 ? (
+              <s-text color="subdued">Aún no hay boletas emitidas.</s-text>
+            ) : (
+              <div
+                style={{
+                  border:       "1px solid var(--p-color-border, #e1e3e5)",
+                  borderRadius: "var(--p-border-radius-200, 8px)",
+                  overflow:     "hidden",
+                }}
+              >
+                {/* Header */}
+                <div
+                  style={{
+                    display:             "grid",
+                    gridTemplateColumns: "1fr 100px 90px 60px",
+                    padding:             "8px 12px",
+                    background:          "var(--p-color-bg-surface-secondary, #f6f6f7)",
+                    borderBottom:        "1px solid var(--p-color-border, #e1e3e5)",
+                    fontSize:            "var(--p-font-size-300, 0.75rem)",
+                    fontWeight:          600,
+                    color:               "var(--p-color-text-subdued, #6d7175)",
+                    textTransform:       "uppercase",
+                    letterSpacing:       "0.04em",
+                  }}
+                >
+                  <span>Orden Shopify</span>
+                  <span>Total</span>
+                  <span>Estado</span>
+                  <span>PDF</span>
+                </div>
+                {recentBoletas.map((doc, idx) => (
+                  <div
+                    key={doc.shopify_order_id}
+                    style={{
+                      display:             "grid",
+                      gridTemplateColumns: "1fr 100px 90px 60px",
+                      padding:             "10px 12px",
+                      alignItems:          "center",
+                      background:          idx % 2 === 0
+                        ? "var(--p-color-bg-surface, #fff)"
+                        : "var(--p-color-bg-surface-secondary, #f6f6f7)",
+                      borderBottom: idx < recentBoletas.length - 1
+                        ? "1px solid var(--p-color-border-subdued, #e1e3e5)"
+                        : "none",
+                      fontSize: "var(--p-font-size-350, 0.875rem)",
+                    }}
+                  >
+                    <span style={{ fontWeight: 600 }}>#{doc.shopify_order_id}</span>
+                    <span>
+                      {doc.total_amount != null
+                        ? new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP" }).format(Number(doc.total_amount))
+                        : "—"}
+                    </span>
+                    <span>
+                      <s-badge
+                        tone={
+                          doc.status === "emitted" ? "success"
+                          : doc.status === "error"  ? "critical"
+                          : "warning"
+                        }
+                      >
+                        {doc.status === "emitted" ? "Emitida"
+                          : doc.status === "error" ? "Error"
+                          : "Pendiente"}
+                      </s-badge>
+                    </span>
+                    <span>
+                      {doc.url_pdf ? (
+                        <a
+                          href={doc.url_pdf}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ color: "var(--p-color-text-emphasis, #005bd3)" }}
+                        >
+                          Ver
+                        </a>
+                      ) : (
+                        <span style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>—</span>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </s-stack>
+        ) : (
+          <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+            <s-stack direction="block" gap="base">
+              <s-text color="subdued">
+                Emite una boleta electrónica en Bsale automáticamente por cada venta en Shopify.
+                El documento se envía al SII y al cliente por email.
+              </s-text>
+              <s-banner tone="info" heading="Add-on de pago — contacta a soporte para activarlo en tu cuenta." />
+            </s-stack>
+          </s-box>
+        )}
       </s-section>
 
     </s-page>

@@ -53,7 +53,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 };
 
-// ── Checkmark icon ────────────────────────────────────────────────────────────
+// ── Icons ─────────────────────────────────────────────────────────────────────
 
 function CheckIcon() {
   return (
@@ -76,21 +76,43 @@ function CheckIcon() {
   );
 }
 
+function XIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 20 20"
+      fill="none"
+      aria-hidden="true"
+      style={{ flexShrink: 0, marginTop: "1px" }}
+    >
+      <path
+        d="M5 5l10 10M15 5L5 15"
+        stroke="var(--p-color-icon-subdued, #8c9196)"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 // ── Plan card ─────────────────────────────────────────────────────────────────
 
 function PlanCard({
   planKey,
   isCurrentPlan,
   isPopular,
+  isBsaleEntry,
   submitting,
 }: {
   planKey:       keyof typeof PLANS;
   isCurrentPlan: boolean;
   isPopular:     boolean;
+  isBsaleEntry:  boolean;
   submitting:    boolean;
 }) {
   const plan     = PLANS[planKey];
-  const features = PLAN_FEATURES[planKey];
+  const features = PLAN_FEATURES[planKey] ?? [];
 
   return (
     <s-box
@@ -106,6 +128,7 @@ function PlanCard({
         <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
           <s-heading>{plan.name}</s-heading>
           {isCurrentPlan && <s-badge tone="success">Tu plan actual</s-badge>}
+          {isBsaleEntry && !isCurrentPlan && <s-badge tone="success">Integración Bsale</s-badge>}
           {isPopular && !isCurrentPlan && <s-badge tone="warning">Más popular</s-badge>}
         </div>
 
@@ -134,13 +157,18 @@ function PlanCard({
 
         {/* Feature list */}
         <s-stack direction="block" gap="small">
-          {features.map((feature) => (
+          {features.map((f) => (
             <div
-              key={feature}
-              style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}
+              key={f.label}
+              style={{
+                display:    "flex",
+                alignItems: "flex-start",
+                gap:        "8px",
+                opacity:    f.included ? 1 : 0.45,
+              }}
             >
-              <CheckIcon />
-              <s-text>{feature}</s-text>
+              {f.included ? <CheckIcon /> : <XIcon />}
+              <s-text>{f.label}</s-text>
             </div>
           ))}
         </s-stack>
@@ -162,6 +190,23 @@ function PlanCard({
             </s-button>
           </div>
         </Form>
+
+        {/* Upsell banner — only on the Bsale entry plan card */}
+        {isBsaleEntry && (
+          <div
+            style={{
+              marginTop:    "auto",
+              padding:      "10px 12px",
+              background:   "var(--p-color-bg-surface-info-subdued, #f0f5ff)",
+              borderRadius: "var(--p-border-radius-200, 8px)",
+              fontSize:     "var(--p-font-size-300, 0.75rem)",
+              color:        "var(--p-color-text-info, #0b64b7)",
+            }}
+          >
+            💡 <strong>¿Necesitas Forecast y Analytics?</strong>{" "}
+            Starter incluye todo por solo <strong>$5 más</strong>.
+          </div>
+        )}
 
       </s-stack>
     </s-box>
@@ -209,13 +254,13 @@ export default function BillingPage() {
           </s-stack>
         </s-section>
 
-        {/* Plan cards */}
+        {/* Plan cards — 4 columns: Bsale, Starter, Growth, Pro */}
         <s-section>
           <div
             style={{
               display:             "grid",
-              gridTemplateColumns: "repeat(3, 1fr)",
-              gap:                 "20px",
+              gridTemplateColumns: "repeat(4, 1fr)",
+              gap:                 "16px",
               alignItems:          "stretch",
             }}
           >
@@ -224,7 +269,8 @@ export default function BillingPage() {
                 key={key}
                 planKey={key}
                 isCurrentPlan={currentPlan === key}
-                isPopular={key === "growth"}
+                isPopular={key === "starter"}
+                isBsaleEntry={key === "bsale"}
                 submitting={submitting}
               />
             ))}

@@ -126,11 +126,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // Fetch rows — include shopify IDs so we can distinguish new vs. changed
   const { data: rows } = await supabaseAdmin
     .from("skus")
-    .select("id, sku_code, title, cost_price, shopify_variant_id, shopify_product_id")
+    .select("id, sku_code, title, cost_price, sale_price, shopify_variant_id, shopify_product_id")
     .eq("shop_id", shopId)
     .in("id", selected);
 
   const rowMap = new Map((rows ?? []).map((r) => [r.id, r]));
+
+  // Log raw DB values to trace price/stock origin
+  for (const r of rows ?? []) {
+    console.log(`[bsale-publish] DB row for ${r.sku_code}: sale_price=${r.sale_price} cost_price=${r.cost_price}`);
+  }
 
   // Pre-fetch location + stock totals once — used for all new products in this batch
   const skuCodes = (rows ?? []).map((r) => r.sku_code);
@@ -153,11 +158,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     (stockRes.data ?? []).map((r) => [r.sku_code, r.total_stock ?? 0]),
   );
 
+  // Log sku_analytics stock values
+  console.log("[bsale-publish] sku_analytics stock map:", JSON.stringify(Object.fromEntries(stockMap)));
+
   for (const supabaseId of selected) {
     const row = rowMap.get(supabaseId);
     if (!row) continue;
 
-    const cost = row.cost_price != null ? String(row.cost_price) : "0";
+    const cost       = row.cost_price != null ? String(row.cost_price) : "0";
+    const price      = row.sale_price != null ? String(row.sale_price) : "0.00";
+    const totalStock = stockMap.get(row.sku_code) ?? 0;
+
+    console.log(`[bsale-publish] sku: ${row.sku_code}`);
+    console.log(`[bsale-publish] sale_price from DB: ${row.sale_price}`);
+    console.log(`[bsale-publish] price being sent to Shopify: ${price}`);
+    console.log(`[bsale-publish] stock being sent: ${totalStock}`);
 
     try {
       let productGid: string;
@@ -223,7 +238,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           productId: productGid,
           variants: [{
             id:            variantGid,
-            price:         "0.00",
+            price,
             inventoryItem: { sku: row.sku_code, cost },
           }],
         },
@@ -258,7 +273,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       // Steps 3 + 4: activate inventory tracking and set initial stock
       // Only for new products — existing products already have tracked inventory
       if (isNewProduct && inventoryItemGid && locationId) {
-        const totalStock = stockMap.get(row.sku_code) ?? 0;
 
         // Step 3: enable tracked = true on the inventory item
         const trackRes = await admin.graphql(INVENTORY_ITEM_UPDATE, {
@@ -374,8 +388,9 @@ export default function BsaleDiffPage() {
             <s-badge tone="neutral">{counts.published} publicados</s-badge>
           </s-stack>
           <s-text>
-            Selecciona qué SKUs de Bsale crear en Shopify. Se crean con precio
-            $0 — actualiza el precio en Shopify después de publicar.
+            Selecciona qué SKUs de Bsale crear en Shopify. Se publicarán con
+            el precio de venta de Bsale (con IVA). Si un SKU no tiene precio
+            en Bsale, se creará con precio $0.
           </s-text>
           {totalPages > 1 && (
             <s-text>

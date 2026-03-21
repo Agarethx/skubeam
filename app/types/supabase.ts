@@ -34,6 +34,53 @@ export type Database = {
   }
   public: {
     Tables: {
+      bsale_documents: {
+        Row: {
+          bsale_document_id: number | null
+          created_at: string | null
+          document_type: string
+          error_message: string | null
+          id: string
+          shop_id: string | null
+          shopify_order_id: string
+          status: string | null
+          total_amount: number | null
+          url_pdf: string | null
+        }
+        Insert: {
+          bsale_document_id?: number | null
+          created_at?: string | null
+          document_type?: string
+          error_message?: string | null
+          id?: string
+          shop_id?: string | null
+          shopify_order_id: string
+          status?: string | null
+          total_amount?: number | null
+          url_pdf?: string | null
+        }
+        Update: {
+          bsale_document_id?: number | null
+          created_at?: string | null
+          document_type?: string
+          error_message?: string | null
+          id?: string
+          shop_id?: string | null
+          shopify_order_id?: string
+          status?: string | null
+          total_amount?: number | null
+          url_pdf?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "bsale_documents_shop_id_fkey"
+            columns: ["shop_id"]
+            isOneToOne: false
+            referencedRelation: "shops"
+            referencedColumns: ["shop_id"]
+          },
+        ]
+      }
       forecast_configs: {
         Row: {
           dead_stock_days: number | null
@@ -164,29 +211,41 @@ export type Database = {
       }
       sales_history: {
         Row: {
+          bsale_document_id: string | null
+          channel: string | null
           id: string
           quantity_sold: number
+          revenue: number | null
           shop_id: string
           shopify_line_item_id: number | null
           shopify_order_id: number | null
+          sku_code: string | null
           sku_id: string
           sold_at: string
         }
         Insert: {
+          bsale_document_id?: string | null
+          channel?: string | null
           id?: string
           quantity_sold: number
+          revenue?: number | null
           shop_id: string
           shopify_line_item_id?: number | null
           shopify_order_id?: number | null
+          sku_code?: string | null
           sku_id: string
           sold_at: string
         }
         Update: {
+          bsale_document_id?: string | null
+          channel?: string | null
           id?: string
           quantity_sold?: number
+          revenue?: number | null
           shop_id?: string
           shopify_line_item_id?: number | null
           shopify_order_id?: number | null
+          sku_code?: string | null
           sku_id?: string
           sold_at?: string
         }
@@ -248,11 +307,14 @@ export type Database = {
       }
       shops: {
         Row: {
+          active_addons: string[] | null
+          bsale_default_office_id: number | null
           bsale_last_sync: string | null
           bsale_token: string | null
           id: string
           installed_at: string | null
           is_active: boolean | null
+          onboarding_done: boolean | null
           plan: string | null
           settings: Json | null
           shop_id: string
@@ -261,11 +323,14 @@ export type Database = {
           woo_migration_preview: boolean | null
         }
         Insert: {
+          active_addons?: string[] | null
+          bsale_default_office_id?: number | null
           bsale_last_sync?: string | null
           bsale_token?: string | null
           id?: string
           installed_at?: string | null
           is_active?: boolean | null
+          onboarding_done?: boolean | null
           plan?: string | null
           settings?: Json | null
           shop_id: string
@@ -274,11 +339,14 @@ export type Database = {
           woo_migration_preview?: boolean | null
         }
         Update: {
+          active_addons?: string[] | null
+          bsale_default_office_id?: number | null
           bsale_last_sync?: string | null
           bsale_token?: string | null
           id?: string
           installed_at?: string | null
           is_active?: boolean | null
+          onboarding_done?: boolean | null
           plan?: string | null
           settings?: Json | null
           shop_id?: string
@@ -297,6 +365,7 @@ export type Database = {
           created_at: string | null
           id: string
           product_type: string | null
+          sale_price: number | null
           shop_id: string
           shopify_product_id: number | null
           shopify_variant_id: number | null
@@ -315,6 +384,7 @@ export type Database = {
           created_at?: string | null
           id?: string
           product_type?: string | null
+          sale_price?: number | null
           shop_id: string
           shopify_product_id?: number | null
           shopify_variant_id?: number | null
@@ -333,6 +403,7 @@ export type Database = {
           created_at?: string | null
           id?: string
           product_type?: string | null
+          sale_price?: number | null
           shop_id?: string
           shopify_product_id?: number | null
           shopify_variant_id?: number | null
@@ -391,37 +462,37 @@ export type Database = {
       }
       woo_connections: {
         Row: {
-          id: string
-          shop_id: string
-          url: string
+          analyzed_at: string | null
           consumer_key: string
           consumer_secret: string
-          product_count: number | null
-          order_count: number | null
-          analyzed_at: string | null
+          id: string
           migrated_at: string | null
+          order_count: number | null
+          product_count: number | null
+          shop_id: string
+          url: string
         }
         Insert: {
-          id?: string
-          shop_id: string
-          url: string
+          analyzed_at?: string | null
           consumer_key: string
           consumer_secret: string
-          product_count?: number | null
-          order_count?: number | null
-          analyzed_at?: string | null
+          id?: string
           migrated_at?: string | null
+          order_count?: number | null
+          product_count?: number | null
+          shop_id: string
+          url: string
         }
         Update: {
-          id?: string
-          shop_id?: string
-          url?: string
+          analyzed_at?: string | null
           consumer_key?: string
           consumer_secret?: string
-          product_count?: number | null
-          order_count?: number | null
-          analyzed_at?: string | null
+          id?: string
           migrated_at?: string | null
+          order_count?: number | null
+          product_count?: number | null
+          shop_id?: string
+          url?: string
         }
         Relationships: []
       }

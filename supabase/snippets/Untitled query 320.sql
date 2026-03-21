@@ -1,3 +1,2 @@
-UPDATE shops 
-SET plan = 'pro', sku_limit = 10000
+SELECT shop_id, plan, active_addons FROM shops 
 WHERE shop_id = '176shop.myshopify.com';

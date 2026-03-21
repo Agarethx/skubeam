@@ -11,11 +11,12 @@ interface BsaleStockVariant {
 }
 
 interface BsaleStock {
-  id:                number;
-  quantityAvailable: number;
-  officeId:          number;
-  variantId:         number;
-  variant?:          BsaleStockVariant;
+  id:       number;
+  /** Available stock quantity — Bsale API field is `quantity`, not `quantityAvailable` */
+  quantity: number;
+  officeId: number;
+  variantId: number;
+  variant?:  BsaleStockVariant;
 }
 
 // ── Fetch ─────────────────────────────────────────────────────────────────────
@@ -37,6 +38,17 @@ export async function syncBsaleStockToSkuBeam(
 ): Promise<{ synced: number; errors: number }> {
   // Fetch Bsale stock records
   const stocks = await getBsaleStocks(bsaleToken);
+
+  // Log first raw stock record to verify API field names
+  if (stocks.length > 0) {
+    const s0 = stocks[0];
+    console.log("[bsale-stock] raw stock[0]:", JSON.stringify(s0, null, 2));
+    console.log("[bsale-stock] stock fields:", {
+      quantity:          (s0 as unknown as Record<string, unknown>)["quantity"],
+      quantityAvailable: (s0 as unknown as Record<string, unknown>)["quantityAvailable"],
+      quantityReserved:  (s0 as unknown as Record<string, unknown>)["quantityReserved"],
+    });
+  }
 
   // Build set of sku_codes we need to look up
   const skuCodes = [
@@ -79,7 +91,7 @@ export async function syncBsaleStockToSkuBeam(
       sku_id:              skuId,
       shopify_location_id: s.officeId,          // Bsale officeId as location identifier
       location_name:       `Oficina ${s.officeId}`,
-      quantity:            Math.max(0, Math.round(s.quantityAvailable)),
+      quantity:            Math.max(0, Math.round(s.quantity)),
       updated_at:          now,
     });
   }

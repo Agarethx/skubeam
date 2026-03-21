@@ -27,3 +27,30 @@ describe('getRequiredPlan', () => {
     expect(getRequiredPlan('aiAssistant')).toBe('pro')
   })
 })
+
+describe('plan bsale', () => {
+  it('bsale tiene bsaleSync', () => {
+    expect(hasFeature('bsale', 'bsaleSync')).toBe(true)
+  })
+  it('bsale tiene bsaleDocuments', () => {
+    expect(hasFeature('bsale', 'bsaleDocuments')).toBe(true)
+  })
+  it('bsale no tiene forecast', () => {
+    expect(hasFeature('bsale', 'forecast')).toBe(false)
+  })
+  it('bsale no tiene analytics', () => {
+    expect(hasFeature('bsale', 'analytics')).toBe(false)
+  })
+  it('starter tiene forecast', () => {
+    expect(hasFeature('starter', 'forecast')).toBe(true)
+  })
+  it('starter tiene bsaleSync', () => {
+    expect(hasFeature('starter', 'bsaleSync')).toBe(true)
+  })
+  it('bsaleSync requiere plan bsale como mínimo', () => {
+    expect(getRequiredPlan('bsaleSync')).toBe('bsale')
+  })
+  it('forecast requiere plan starter como mínimo', () => {
+    expect(getRequiredPlan('forecast')).toBe('starter')
+  })
+})

@@ -91,7 +91,10 @@
     "trial": "14 días gratis",
     "select": "Seleccionar plan",
     "plans": {
-      "starter": "Starter",
+      "bsale": "SkuBeam Bsale",
+      "bsaleDescription": "La integración Bsale más completa para Shopify",
+      "bsaleUpsell": "¿Necesitas Forecast y Analytics? Starter incluye todo por $5 más",
+      "starter": "SkuBeam Starter",
       "growth": "Growth",
       "pro": "Pro"
     }
