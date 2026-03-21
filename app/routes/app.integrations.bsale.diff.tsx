@@ -40,7 +40,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     // Paginated "new" SKUs for the table
     supabaseAdmin
       .from("skus")
-      .select("id, sku_code, title, cost_price")
+      .select("id, sku_code, title, cost_price, sale_price, barcode")
       .eq("shop_id", shopId)
       .eq("status", "active")
       .is("shopify_variant_id", null)
@@ -52,12 +52,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   console.log(`[bsale-diff] new=${newTotal} published=${publishedCountResult.count ?? 0} page=${page}`);
 
+  if ((pageRowsResult.data ?? []).length > 0) {
+    console.log("[bsale-diff] first sku sample:", JSON.stringify(pageRowsResult.data![0], null, 2));
+  }
+
   return {
     counts: {
       new:       newTotal,
       published: publishedCountResult.count ?? 0,
     },
-    items:      (pageRowsResult.data ?? []) as Pick<Tables<"skus">, "id" | "sku_code" | "title" | "cost_price">[],
+    items:      (pageRowsResult.data ?? []) as Pick<Tables<"skus">, "id" | "sku_code" | "title" | "cost_price" | "sale_price" | "barcode">[],
     page,
     totalPages: Math.ceil(newTotal / PAGE_SIZE),
   };
@@ -126,7 +130,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // Fetch rows — include shopify IDs so we can distinguish new vs. changed
   const { data: rows } = await supabaseAdmin
     .from("skus")
-    .select("id, sku_code, title, cost_price, sale_price, shopify_variant_id, shopify_product_id")
+    .select("id, sku_code, title, cost_price, sale_price, barcode, shopify_variant_id, shopify_product_id")
     .eq("shop_id", shopId)
     .in("id", selected);
 
@@ -239,6 +243,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           variants: [{
             id:            variantGid,
             price,
+            ...(row.barcode ? { barcode: row.barcode } : {}),
             inventoryItem: { sku: row.sku_code, cost },
           }],
         },
@@ -443,7 +448,7 @@ export default function BsaleDiffPage() {
                       </th>
                       <th style={{ padding: "8px", textAlign: "left" }}>SKU</th>
                       <th style={{ padding: "8px", textAlign: "left" }}>Título (Bsale)</th>
-                      <th style={{ padding: "8px", textAlign: "right" }}>Costo</th>
+                      <th style={{ padding: "8px", textAlign: "right" }}>Precio (Bsale)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -467,8 +472,8 @@ export default function BsaleDiffPage() {
                           {row.title ?? <em style={{ color: "var(--p-color-text-subdued)" }}>Sin título</em>}
                         </td>
                         <td style={{ padding: "8px", textAlign: "right" }}>
-                          {row.cost_price != null
-                            ? `$${Number(row.cost_price).toLocaleString("es-CL")}`
+                          {row.sale_price != null
+                            ? `$${Number(row.sale_price).toLocaleString("es-CL")}`
                             : <em style={{ color: "var(--p-color-text-subdued)" }}>—</em>}
                         </td>
                       </tr>

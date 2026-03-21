@@ -310,6 +310,8 @@ export type Database = {
           active_addons: string[] | null
           bsale_default_office_id: number | null
           bsale_last_sync: string | null
+          bsale_office_id: number | null
+          bsale_price_list_id: number | null
           bsale_token: string | null
           id: string
           installed_at: string | null
@@ -326,6 +328,8 @@ export type Database = {
           active_addons?: string[] | null
           bsale_default_office_id?: number | null
           bsale_last_sync?: string | null
+          bsale_office_id?: number | null
+          bsale_price_list_id?: number | null
           bsale_token?: string | null
           id?: string
           installed_at?: string | null
@@ -342,6 +346,8 @@ export type Database = {
           active_addons?: string[] | null
           bsale_default_office_id?: number | null
           bsale_last_sync?: string | null
+          bsale_office_id?: number | null
+          bsale_price_list_id?: number | null
           bsale_token?: string | null
           id?: string
           installed_at?: string | null
@@ -427,9 +433,11 @@ export type Database = {
       sync_jobs: {
         Row: {
           completed_at: string | null
+          created_at: string | null
           error_message: string | null
           id: string
           operation_id: string | null
+          payload: Json | null
           records_processed: number | null
           shop_id: string
           started_at: string | null
@@ -438,9 +446,11 @@ export type Database = {
         }
         Insert: {
           completed_at?: string | null
+          created_at?: string | null
           error_message?: string | null
           id?: string
           operation_id?: string | null
+          payload?: Json | null
           records_processed?: number | null
           shop_id: string
           started_at?: string | null
@@ -449,9 +459,11 @@ export type Database = {
         }
         Update: {
           completed_at?: string | null
+          created_at?: string | null
           error_message?: string | null
           id?: string
           operation_id?: string | null
+          payload?: Json | null
           records_processed?: number | null
           shop_id?: string
           started_at?: string | null

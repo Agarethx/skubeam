@@ -1,8 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
-import {
-  handleBsaleDocumentAdd,
-  type BsaleNotification,
-} from "../integrations/bsale/realtime.server";
+import type { BsaleNotification } from "../integrations/bsale/realtime.server";
+import { supabaseAdmin } from "../db.server";
 
 /**
  * POST /webhooks/bsale/document?shop=<myshopify-domain>
@@ -11,11 +9,8 @@ import {
  * is created. The merchant registers this URL manually in the Bsale panel
  * (Configuración → Webhooks), including the ?shop= query param.
  *
- * Verification: optional header `x-bsale-secret` checked against
- * env var BSALE_WEBHOOK_SECRET. If the env var is not set, verification
- * is skipped (useful for local dev).
- *
- * Always returns 200 so Bsale does not retry.
+ * Strategy: enqueue a sync_jobs row and respond 200 immediately.
+ * A worker processes the job asynchronously to keep response time under 500ms.
  */
 export const action = async ({ request }: ActionFunctionArgs) => {
   try {
@@ -39,7 +34,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // 3. Parse Bsale notification (lightweight — only carries resourceId + resource)
     const notification = await request.json() as BsaleNotification;
-    console.log("[bsale-webhook] notification:", JSON.stringify(notification, null, 2));
+    console.log("[bsale-webhook] notification:", JSON.stringify(notification));
 
     const { resourceId } = notification;
     if (!resourceId) {
@@ -47,9 +42,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return new Response(null, { status: 200 });
     }
 
-    // 4. Fetch full Bsale document and adjust Shopify inventory
-    // (handler loads its own GraphQL client from the stored offline session)
-    await handleBsaleDocumentAdd(shopDomain, resourceId);
+    // 4. Enqueue job — do NOT process here
+    await supabaseAdmin
+      .from("sync_jobs")
+      .insert({
+        shop_id: shopDomain,
+        type:    "bsale_document",
+        payload: { resourceId },
+        status:  "pending",
+      });
+
+    console.log(`[bsale-webhook] Enqueued bsale_document job for shop ${shopDomain} resourceId ${resourceId}`);
+
+    // 5. Fire-and-forget worker trigger (non-blocking)
+    const appUrl      = process.env.APP_URL;
+    const workerSecret = process.env.WORKER_SECRET;
+    if (appUrl && workerSecret) {
+      fetch(`${appUrl}/api/worker`, {
+        method:  "POST",
+        headers: { "x-worker-secret": workerSecret },
+      }).catch(() => {});
+    }
   } catch (err) {
     console.error("[webhooks.bsale.document]", err);
   }

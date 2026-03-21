@@ -1,8 +1,9 @@
 import { supabaseAdmin } from "../../db.server";
-import { get, paginate, resolveToken } from "./client.server";
+import { get } from "./client.server";
+import { getShop } from "../../models/shop.server";
 import { refreshSkuAnalytics } from "../../models/sync.server";
 
-// ── Admin client type (mirrors authenticate.admin return) ─────────────────────
+// ── Admin client type ─────────────────────────────────────────────────────────
 type AdminClient = {
   graphql: (
     query: string,
@@ -10,180 +11,139 @@ type AdminClient = {
   ) => Promise<Response>;
 };
 
-// ── Bsale types ───────────────────────────────────────────────────────────────
+// ── Bsale price-list detail (with expand=[variant]) ───────────────────────────
 
-interface BsaleInlineCostItem {
-  /** Sale price with IVA */
-  cost?: number;
-  /** Net sale price before IVA */
-  netCost?: number;
-  /** Purchase / average cost (used as cost_price in Supabase) */
-  averageCost?: number;
-}
-
-/** Variant with inline product + costs (expand=[product,costs]) */
-interface BsaleVariantFull {
-  id:          number;
-  code:        string;
-  barCode:     string | null;
-  description: string;
-  state:       number;
-  /** Direct price on the variant — sometimes populated even without a price list */
-  price?:      number;
-  /** Direct cost on the variant — used as last-resort fallback */
-  cost?:       number;
-  product: {
-    id:   number;
-    name: string;
-  } | null;
-  /** Inline costs — present when expand=[costs] */
-  costs?: {
-    href?:  string;
-    items?: BsaleInlineCostItem[];
+interface BsalePriceDetail {
+  variantValueWithTaxes: number;
+  variant?: {
+    id:           number;
+    code?:        string;
+    description?: string;
+    barCode?:     string | null;
+    product?: {
+      name?: string;
+    };
   };
 }
 
-interface BsalePriceList {
-  id:     number;
-  name:   string;
-  state:  number;
-}
-
-// ── Price list probe ──────────────────────────────────────────────────────────
-
-/**
- * Fetch active Bsale price lists and log their structure.
- * Returns the ID of the first active price list, or null if none.
- */
-async function probePriceLists(token: string): Promise<number | null> {
-  try {
-    const data = await get<{ count: number; items?: BsalePriceList[] }>(
-      "/price_lists.json",
-      token,
-    );
-    console.log("[bsale-sync] GET /price_lists.json →", JSON.stringify(data, null, 2));
-    const active = (data.items ?? []).find((pl) => pl.state === 0);
-    return active?.id ?? data.items?.[0]?.id ?? null;
-  } catch (err) {
-    console.warn("[bsale-sync] price_lists.json not available:", String(err));
-    return null;
-  }
-}
-
-// ── Price resolver ────────────────────────────────────────────────────────────
-
-/**
- * Resolve sale price and average cost from a variant's inline costs + direct fields.
- *
- * Fallback chain for salePrice:
- *   1. costs.items[0].cost         (sale price with IVA — most accurate)
- *   2. costs.items[0].netCost*1.19 (net price + IVA)
- *   3. variant.price               (direct field if populated)
- *   4. variant.cost * 1.19         (cost + IVA estimate)
- *   5. null                        (no price data in sandbox/unconfigured lists)
- */
-function resolvePrices(v: BsaleVariantFull): { averageCost: number | null; salePrice: number | null } {
-  const item = v.costs?.items?.[0];
-
-  const averageCost = item?.averageCost != null ? Number(item.averageCost) : null;
-
-  let salePrice: number | null = null;
-  let source = "none";
-
-  if (item?.cost != null && Number(item.cost) > 0) {
-    salePrice = Number(item.cost);
-    source = "costs.cost";
-  } else if (item?.netCost != null && Number(item.netCost) > 0) {
-    salePrice = Math.round(Number(item.netCost) * 1.19 * 100) / 100;
-    source = "costs.netCost*1.19";
-  } else if (v.price != null && Number(v.price) > 0) {
-    salePrice = Number(v.price);
-    source = "variant.price";
-  } else if (v.cost != null && Number(v.cost) > 0) {
-    salePrice = Math.round(Number(v.cost) * 1.19 * 100) / 100;
-    source = "variant.cost*1.19";
-  }
-
-  console.log(
-    `[bsale-sync] salePrice resolved: ${salePrice} (source: ${source}) for variant: ${v.id} code: ${v.code}`,
-  );
-
-  return { averageCost, salePrice };
+interface BsalePage<T> {
+  count:  number;
+  limit:  number;
+  offset: number;
+  items?: T[];
 }
 
 // ── Sync ──────────────────────────────────────────────────────────────────────
 
+/**
+ * Sync Bsale catalogue → Supabase SKUs using the merchant's configured price list
+ * as the source of truth.
+ *
+ * Strategy:
+ *   1. Paginate /price_lists/{id}/details.json?expand=[variant]
+ *   2. Each item carries the sale price + variant metadata (code, title, id)
+ *   3. Upsert into skus in batches of 200
+ *   4. Refresh materialized view
+ *
+ * The token is resolved by jobs.server.ts before calling this function.
+ */
 export async function syncBsaleToSkuBeam(
-  shopId:     string,
-  bsaleToken: string | null | undefined,
-): Promise<{ synced: number; errors: number }> {
-  const token = resolveToken(bsaleToken);
+  shopId: string,
+  token:  string,
+): Promise<{ synced: number }> {
+  const shop = await getShop(shopId);
+  const priceListId = shop?.bsale_price_list_id;
 
-  // Probe price lists once to understand sandbox config (non-blocking)
-  await probePriceLists(token);
-
-  console.log("[bsale-sync] Fetching variants with expand=[product,costs]...");
-  const variants = await paginate<BsaleVariantFull>("/variants.json", token, {
-    expand: "[product,costs]",
-    state:  "0",
-  });
-  console.log(`[bsale-sync] Got ${variants.length} variants`);
-
-  // Log first raw variant to verify API structure (product + inline costs)
-  if (variants.length > 0) {
-    console.log("[bsale-sync] raw variant[0]:", JSON.stringify(variants[0], null, 2));
+  if (!priceListId) {
+    throw new Error(
+      "No hay lista de precios configurada. Ve a Integraciones → Bsale para configurarla.",
+    );
   }
 
-  const valid = variants.filter((v) => v.code?.trim());
-  console.log(`[bsale-sync] Valid variants with code: ${valid.length}`);
-  console.log(`[bsale-sync] shopId: "${shopId}"`);
+  console.log(`[bsale-sync] Usando lista de precios ${priceListId}`);
 
-  const now    = new Date().toISOString();
-  let synced   = 0;
-  let errors   = 0;
+  // ── 1. Paginate the price list ────────────────────────────────────────────
+  const skuRows: Array<{
+    shop_id:          string;
+    sku_code:         string;
+    title:            string;
+    sale_price:       number | null;
+    barcode:          string | null;
+    bsale_variant_id: string;
+  }> = [];
 
-  const rows = valid.map((v) => {
-    const variantLabel =
-      v.description && v.description !== v.product?.name
-        ? ` - ${v.description}`
-        : "";
-    const { averageCost, salePrice } = resolvePrices(v);
+  let offset = 0;
+  const limit = 50;
 
-    return {
-      shop_id:          shopId,
-      sku_code:         v.code.trim(),
-      barcode:          v.barCode?.trim() || null,
-      title:            v.product?.name
-        ? `${v.product.name}${variantLabel}`
-        : v.description || v.code,
-      cost_price:       averageCost,
-      sale_price:       salePrice,
-      status:           "active" as const,
-      updated_at:       now,
-      bsale_variant_id: String(v.id),
-    };
-  });
+  while (true) {
+    const data = await get<BsalePage<BsalePriceDetail>>(
+      `/price_lists/${priceListId}/details.json?expand=[variant,product]&limit=${limit}&offset=${offset}`,
+      token,
+    );
 
-  // Upsert in batches of 200
-  for (let i = 0; i < rows.length; i += 200) {
-    const batch = rows.slice(i, i + 200);
-    console.log(`[bsale-sync] Upserting SKU batch ${i}–${i + batch.length - 1}...`);
+    const items = data?.items ?? [];
+    if (items.length === 0) break;
+
+    // Log full structure of first item on first page for diagnostics
+    if (offset === 0 && skuRows.length < 2 && items[0]) {
+      console.log("[bsale-debug] first item with product expand:", JSON.stringify(items[0], null, 2));
+    }
+
+    for (const item of items) {
+      const v = item.variant;
+      if (!v?.id || !v.code?.trim()) continue; // skip items without a SKU code
+
+      // product.name is the primary title — cleaner than description which is often a variant label
+      const title =
+        v.product?.name?.trim() ||
+        v.description?.trim()   ||
+        v.code.trim();
+
+      skuRows.push({
+        shop_id:          shopId,
+        sku_code:         v.code.trim(),
+        title,
+        sale_price:       item.variantValueWithTaxes > 0 ? item.variantValueWithTaxes : null,
+        barcode:          v.barCode ?? null,
+        bsale_variant_id: String(v.id),
+      });
+    }
+
+    console.log(
+      `[bsale-sync] Lista de precios: ${skuRows.length} SKUs cargados (offset ${offset})`,
+    );
+
+    if (items.length < limit) break;
+    offset += limit;
+  }
+
+  console.log(`[bsale-sync] Total SKUs desde lista de precios: ${skuRows.length}`);
+
+  if (skuRows.length === 0) {
+    console.warn("[bsale-sync] La lista de precios no devolvió variantes con código. Verifica la configuración.");
+    return { synced: 0 };
+  }
+
+  // ── 2. Upsert in batches of 200 ───────────────────────────────────────────
+  for (let i = 0; i < skuRows.length; i += 200) {
+    const batch = skuRows.slice(i, i + 200);
 
     const { error } = await supabaseAdmin
       .from("skus")
       .upsert(batch, { onConflict: "shop_id,sku_code" });
 
     if (error) {
-      console.error(`[bsale-sync] Upsert error batch ${i}:`, JSON.stringify(error));
-      errors += batch.length;
+      console.error(`[bsale-sync] Upsert error batch ${i}:`, error.message);
     } else {
-      synced += batch.length;
+      console.log(`[bsale-sync] Upserted batch ${i}–${i + batch.length - 1}`);
     }
   }
 
-  console.log(`[bsale-sync] Done. synced=${synced} errors=${errors}`);
+  // ── 3. Refresh analytics ──────────────────────────────────────────────────
   await refreshSkuAnalytics();
-  return { synced, errors };
+
+  console.log(`[bsale-sync] Done. synced=${skuRows.length}`);
+  return { synced: skuRows.length };
 }
 
 // ── Diff: Bsale (Supabase) ↔ Shopify ─────────────────────────────────────────
@@ -215,7 +175,7 @@ async function fetchAllShopifyVariants(admin: AdminClient): Promise<ShopifyVaria
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const res  = await admin.graphql(
+    const res = await admin.graphql(
       `#graphql
       query AllVariants($cursor: String) {
         productVariants(first: 250, after: $cursor) {
@@ -256,7 +216,6 @@ export async function getBsaleShopifyDiff(
     fetchAllShopifyVariants(admin),
   ]);
 
-  // Map shopify variants by sku_code (non-empty)
   const shopifyMap = new Map<string, ShopifyVariantNode>();
   for (const v of shopifyVariants) {
     if (v.sku?.trim()) shopifyMap.set(v.sku.trim(), v);

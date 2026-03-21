@@ -52,7 +52,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // ── Load SKU ──────────────────────────────────────────────────────────────
   const { data: sku } = await supabaseAdmin
     .from("skus")
-    .select("id, sku_code, title, vendor, cost_price")
+    .select("id, sku_code, title, vendor, cost_price, sale_price, barcode")
     .eq("shop_id", shopId)
     .eq("id", skuId)
     .is("shopify_variant_id", null)
@@ -106,12 +106,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const variantGid       = variantNode.id;
   const inventoryItemGid = variantNode.inventoryItem.id;
 
-  // ── Step 2: set variant price (SKU goes on inventoryItem, not variant) ───
+  // ── Step 2: set variant price, barcode and cost ───────────────────────────
   const variantInput: Record<string, unknown> = { id: variantGid };
-  if (sku.cost_price) variantInput.price = String(sku.cost_price);
+  if (sku.sale_price)  variantInput.price   = String(sku.sale_price);
+  if (sku.barcode)     variantInput.barcode = sku.barcode;
 
   await admin.graphql(VARIANT_UPDATE_MUTATION, {
-    variables: { productId: productGid, variants: [variantInput] },
+    variables: {
+      productId: productGid,
+      variants:  [{ ...variantInput, inventoryItem: { sku: sku.sku_code, cost: sku.cost_price ? String(sku.cost_price) : undefined } }],
+    },
   });
 
   // ── Step 3: enable inventory tracking ────────────────────────────────────

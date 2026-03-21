@@ -1,2 +1,1 @@
-SELECT shop_id, plan, active_addons FROM shops 
-WHERE shop_id = '176shop.myshopify.com';
+SELECT shop_id, bsale_price_list_id, bsale_office_id FROM shops WHERE shop_id = '176shop.myshopify.com';

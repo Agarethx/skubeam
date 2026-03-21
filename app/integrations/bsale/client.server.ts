@@ -168,6 +168,138 @@ export async function registerBsaleWebhook(
   }
 }
 
+// ── Price list helpers ────────────────────────────────────────────────────────
+
+interface BsalePriceListItem {
+  id:    number;
+  name:  string;
+  state: number;
+  base:  number | null;
+}
+
+interface BsalePriceListDetail {
+  variantValueWithTaxes: number;
+  variant?: { id: number };
+}
+
+/**
+ * Auto-detect the merchant's base price list.
+ * Prefers active lists (`state=0`) with `base=0` (standard retail list).
+ * Returns the list ID or null if none found / API unavailable.
+ */
+export async function detectBasePriceList(token: string): Promise<number | null> {
+  try {
+    const data = await get<BsalePage<BsalePriceListItem>>("/price_lists.json?state=0&limit=50", token);
+    const items = data?.items ?? [];
+    const found =
+      items.find((l) => l.state === 0 && l.base === 0) ??
+      items.find((l) => l.state === 0);
+    console.log(`[bsale-prices] detectBasePriceList → id=${found?.id ?? null} name="${found?.name ?? "-"}"`);
+    return found?.id ?? null;
+  } catch (err) {
+    console.warn("[bsale-prices] detectBasePriceList failed:", String(err));
+    return null;
+  }
+}
+
+/**
+ * Load the full variant→price map from a Bsale price list.
+ * Key: bsale variant ID (number). Value: price with taxes (sale price).
+ * Skips items with price <= 0.
+ */
+export async function fetchPriceMap(
+  token:       string,
+  priceListId: number,
+): Promise<Map<number, number>> {
+  const priceMap = new Map<number, number>();
+  let offset = 0;
+  const limit = 50;
+
+  while (true) {
+    const data = await get<BsalePage<BsalePriceListDetail>>(
+      `/price_lists/${priceListId}/details.json?limit=${limit}&offset=${offset}&expand=[variant]`,
+      token,
+    );
+    const items = data?.items ?? [];
+
+    for (const item of items) {
+      if (item.variant?.id && item.variantValueWithTaxes > 0) {
+        priceMap.set(item.variant.id, item.variantValueWithTaxes);
+      }
+    }
+
+    if (items.length < limit) break;
+    offset += limit;
+  }
+
+  console.log(`[bsale-prices] Loaded ${priceMap.size} prices from price list ${priceListId}`);
+  return priceMap;
+}
+
+// ── Wizard setup helpers ──────────────────────────────────────────────────────
+
+const COIN_NAMES: Record<string, string> = { "1": "CLP", "2": "USD" };
+
+export interface BsalePriceListOption {
+  id:       number;
+  name:     string;
+  currency: string;
+}
+
+export interface BsaleOfficeOption {
+  id:      number;
+  name:    string;
+  address: string;
+}
+
+interface RawPriceList {
+  id:    number;
+  name:  string;
+  state: number;
+  coin?: { id?: string };
+}
+
+interface RawOffice {
+  id:      number;
+  name:    string;
+  state:   number;
+  address?: string;
+}
+
+/** Return active price lists (state=0) for the merchant — used in setup wizard. */
+export async function getPriceLists(token: string): Promise<BsalePriceListOption[]> {
+  try {
+    const data = await get<BsalePage<RawPriceList>>("/price_lists.json?state=0&limit=50", token);
+    return (data?.items ?? [])
+      .filter((l) => l.state === 0)
+      .map((l) => ({
+        id:       l.id,
+        name:     l.name,
+        currency: COIN_NAMES[l.coin?.id ?? ""] ?? "CLP",
+      }));
+  } catch (err) {
+    console.warn("[bsale] getPriceLists failed:", String(err));
+    return [];
+  }
+}
+
+/** Return active offices (state=0) for the merchant — used in setup wizard. */
+export async function getOffices(token: string): Promise<BsaleOfficeOption[]> {
+  try {
+    const data = await get<BsalePage<RawOffice>>("/offices.json?state=0&limit=50", token);
+    return (data?.items ?? [])
+      .filter((o) => o.state === 0)
+      .map((o) => ({
+        id:      o.id,
+        name:    o.name,
+        address: o.address ?? "",
+      }));
+  } catch (err) {
+    console.warn("[bsale] getOffices failed:", String(err));
+    return [];
+  }
+}
+
 /** Resolve the token to use: merchant-specific first, then env fallback. */
 export function resolveToken(bsaleToken: string | null | undefined): string {
   const token = bsaleToken ?? process.env.BSALE_ACCESS_TOKEN;
