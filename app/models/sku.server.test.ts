@@ -23,6 +23,7 @@ describe("computeHealthScore", () => {
       barcode: "1234567890128",
       vendor: "ACME",
       cost_price: 9.99,
+      sale_price: 19.99,
     });
     const { score, criteria } = computeHealthScore(sku, {
       total_stock: 10,

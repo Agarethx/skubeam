@@ -9,6 +9,7 @@ vi.mock("../db.server", () => {
     eq: () => chain,
     order: () => chain,
     limit: () => chain,
+    range: () => chain,
     gt: () => chain,
     then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) =>
       Promise.resolve({ data: mockData.rows, error: null }).then(resolve, reject),
