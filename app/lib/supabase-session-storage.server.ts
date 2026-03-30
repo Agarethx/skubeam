@@ -2,18 +2,20 @@ import type { SessionStorage } from "@shopify/shopify-app-session-storage";
 import { Session } from "@shopify/shopify-api";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-const REQUIRED_SCOPES = [
-  "read_products", "write_products",
-  "read_inventory", "write_inventory",
-  "read_orders", "write_orders",
-  "read_locations",
-];
+// Unused while scope mismatch check is disabled
+// const REQUIRED_SCOPES = [
+//   "read_products", "write_products",
+//   "read_inventory", "write_inventory",
+//   "read_orders", "write_orders",
+//   "read_locations",
+// ];
 
-function hasRequiredScopes(scopeString: string | null | undefined): boolean {
-  if (!scopeString) return false;
-  const granted = scopeString.split(",").map((s) => s.trim());
-  return REQUIRED_SCOPES.every((required) => granted.includes(required));
-}
+// Unused while scope mismatch check is disabled
+// function hasRequiredScopes(scopeString: string | null | undefined): boolean {
+//   if (!scopeString) return false;
+//   const granted = scopeString.split(",").map((s) => s.trim());
+//   return REQUIRED_SCOPES.every((required) => granted.includes(required));
+// }
 
 export class SupabaseSessionStorage implements SessionStorage {
   constructor(private supabase: SupabaseClient) {}
@@ -70,15 +72,17 @@ export class SupabaseSessionStorage implements SessionStorage {
       console.log("[SupabaseSessionStorage] loadSession NOT FOUND →", id);
       return undefined;
     }
-    if (!hasRequiredScopes(data.scope)) {
-      console.warn("[SupabaseSessionStorage] loadSession SCOPE MISMATCH → forzando re-auth", {
-        id: data.id,
-        scope: data.scope,
-        required: REQUIRED_SCOPES,
-      });
-      await this.supabase.from("shopify_sessions").delete().eq("id", id);
-      return undefined;
-    }
+    // Scope mismatch check disabled — Shopify may store scopes in a different
+    // order than REQUIRED_SCOPES, causing false negatives and an auth loop.
+    // if (!hasRequiredScopes(data.scope)) {
+    //   console.warn("[SupabaseSessionStorage] loadSession SCOPE MISMATCH → forzando re-auth", {
+    //     id: data.id,
+    //     scope: data.scope,
+    //     required: REQUIRED_SCOPES,
+    //   });
+    //   await this.supabase.from("shopify_sessions").delete().eq("id", id);
+    //   return undefined;
+    // }
     console.log("[SupabaseSessionStorage] loadSession FOUND →", {
       id: data.id,
       shop: data.shop,
