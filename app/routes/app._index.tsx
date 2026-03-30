@@ -18,7 +18,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopId = session.shop;
 
-  const [shop, kpis, abcRows, { rows: forecastRows }, attentionSkus, skuCountResult, wooConn] =
+  const [shop, kpis, abcRows, { rows: forecastRows }, attentionSkus, skuCountResult, activeSkuResult, wooConn] =
     await Promise.all([
       getShop(shopId).catch(() => null),
       getShopKpis(shopId),
@@ -26,10 +26,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       getForecastForShop(shopId),
       getLowestHealthScoreSkus(shopId, 10),
       supabaseAdmin.from("skus").select("id", { count: "exact", head: true }).eq("shop_id", shopId),
+      // Direct count of SKUs published to Shopify (shopify_variant_id IS NOT NULL)
+      supabaseAdmin.from("skus").select("*", { count: "exact", head: true }).eq("shop_id", shopId).not("shopify_variant_id", "is", null),
       supabaseAdmin.from("woo_connections").select("id").eq("shop_id", shopId).limit(1).maybeSingle(),
     ]);
 
   const skuCount       = skuCountResult.count ?? 0;
+  const activeSkuCount = activeSkuResult.count ?? 0;
+  console.log("[dashboard] totalSkuCount (all skus):", skuCount);
+  console.log("[dashboard] activeSkuCount (shopify_variant_id IS NOT NULL):", activeSkuCount);
   const hasBsale       = Boolean(shop?.bsale_token);
   const hasWooConn     = Boolean(wooConn.data);
   const showOnboarding = !(shop as { onboarding_done?: boolean } | null)?.onboarding_done && skuCount === 0;
@@ -51,7 +56,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   return {
     shopId, shop, kpis, abcCounts, criticalCount, attentionSkus: attentionWithReorder,
-    showOnboarding, hasBsale, hasWooConn, skuCount,
+    showOnboarding, hasBsale, hasWooConn, skuCount, activeSkuCount,
   };
 };
 
@@ -442,7 +447,7 @@ function OnboardingFlow({
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { shopId, shop, kpis, abcCounts, criticalCount, attentionSkus, showOnboarding } =
+  const { shopId, shop, kpis, abcCounts, criticalCount, attentionSkus, showOnboarding, skuCount, activeSkuCount } =
     useLoaderData<typeof loader>();
 
   const navigate       = useSkuBeamNavigate();
@@ -451,9 +456,9 @@ export default function Dashboard() {
   const bsaleConnected = Boolean(shop?.bsale_token);
 
   // Short badge labels — avoid truncation inside narrow cards
-  const criticalBadge  = criticalCount > 0 ? `${criticalCount} crítico${criticalCount > 1 ? "s" : ""}` : "OK";
-  const costBadge      = kpis.skus_with_cost > 0 ? `${kpis.skus_with_cost} c/costo` : "Sin datos";
-  const rotBadge       = kpis.turnover_ratio > 0 ? "últ. 30d" : "—";
+  const criticalBadge   = criticalCount > 0 ? `${criticalCount} crítico${criticalCount > 1 ? "s" : ""}` : "OK";
+  const publishedBadge  = activeSkuCount > 0 ? `${activeSkuCount.toLocaleString("es-CL")} en Shopify` : "Sin publicar";
+  const rotBadge        = kpis.turnover_ratio > 0 ? "últ. 30d" : "—";
 
   return (
     <>
@@ -466,8 +471,10 @@ export default function Dashboard() {
           gap="base"
         >
           <KpiCard
-            label={t('dashboard.activeSkus')}
-            value={kpis.active_skus.toLocaleString("es-CL")}
+            label="SKUs sincronizados"
+            value={skuCount.toLocaleString("es-CL")}
+            badgeTone={activeSkuCount > 0 ? "success" : "neutral"}
+            badge={publishedBadge}
           />
           <KpiCard
             label={t('dashboard.criticalSkus')}
@@ -478,8 +485,6 @@ export default function Dashboard() {
           <KpiCard
             label={t('dashboard.inventoryValue')}
             value={fmtCurrency(kpis.estimated_stock_value)}
-            badgeTone={kpis.skus_with_cost > 0 ? "neutral" : "neutral"}
-            badge={costBadge}
           />
           <KpiCard
             label={t('dashboard.unitsSold')}

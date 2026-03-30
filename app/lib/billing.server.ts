@@ -97,11 +97,21 @@ export function planNameToKey(name: string): PlanKey | null {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+const BILLING_BYPASS_SHOPS: string[] = [
+  "terraoutdoorcl.myshopify.com",
+];
+
 /**
  * Returns the active plan key and its feature set, or null if the shop
  * has no active paid subscription.
  */
-export async function checkBilling(admin: AdminClient): Promise<BillingResult | null> {
+export async function checkBilling(admin: AdminClient, shop?: string): Promise<BillingResult | null> {
+  if (shop && BILLING_BYPASS_SHOPS.includes(shop)) {
+    return {
+      plan: "starter",
+      features: FEATURE_FLAGS.starter,
+    };
+  }
   const sub = await getActiveSubscription(admin);
   if (!sub) return null;
   const plan = planNameToKey(sub.name);

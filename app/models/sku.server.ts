@@ -48,14 +48,28 @@ export async function listSkus(
 
 // ── Unpublished (no shopify_variant_id) ──────────────────────────────────────
 
-export async function listUnpublishedSkus(shopId: string) {
-  const { data, error, count } = await supabaseAdmin
+const UNPUB_PAGE_SIZE = 50;
+
+export async function listUnpublishedSkus(
+  shopId: string,
+  { search = "", page = 1 }: { search?: string; page?: number } = {},
+) {
+  const from = (page - 1) * UNPUB_PAGE_SIZE;
+  const to   = from + UNPUB_PAGE_SIZE - 1;
+
+  let query = supabaseAdmin
     .from("skus")
     .select("*", { count: "exact" })
     .eq("shop_id", shopId)
     .is("shopify_variant_id", null)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .range(from, to);
 
+  if (search) {
+    query = query.or(`sku_code.ilike.%${search}%,title.ilike.%${search}%`);
+  }
+
+  const { data, error, count } = await query;
   if (error) throw new Error(`listUnpublishedSkus: ${error.message}`);
   return { skus: data ?? [], total: count ?? 0 };
 }
@@ -297,7 +311,7 @@ export function computeHealthScore(
     { label: "Tiene título",      points: 20, earned: Boolean(sku.title?.trim()) },
     { label: "Tiene barcode",     points: 25, earned: Boolean(sku.barcode?.trim()) },
     { label: "Tiene vendor",      points: 15, earned: Boolean(sku.vendor?.trim()) },
-    { label: "Tiene costo",       points: 15, earned: sku.cost_price != null },
+    { label: "Tiene precio",      points: 15, earned: Boolean(sku.sale_price && Number(sku.sale_price) > 0) },
     { label: "Stock disponible",  points: 15, earned: (analytics.total_stock ?? 0) > 0 },
     { label: "Ventas últimos 30d", points: 10, earned: (analytics.sold_30d ?? 0) > 0 },
   ];
@@ -328,7 +342,7 @@ export async function getLowestHealthScoreSkus(
   const [analyticsResult, skusResult] = await Promise.all([
     supabaseAdmin
       .from("sku_analytics")
-      .select("id, sku_code, title, vendor, cost_price, total_stock, sold_30d")
+      .select("id, sku_code, title, vendor, cost_price, sale_price, total_stock, sold_30d")
       .eq("shop_id", shopId)
       .eq("status", "active"),
     supabaseAdmin
@@ -351,6 +365,7 @@ export async function getLowestHealthScoreSkus(
       barcode:    barcodeMap.get(a.id ?? "") ?? null,
       vendor:     a.vendor,
       cost_price: a.cost_price,
+      sale_price: a.sale_price,
     } as SkuDetail;
 
     const { score } = computeHealthScore(skuForScore, {

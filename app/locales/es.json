@@ -41,7 +41,7 @@
     "publishSelected": "Publicar seleccionados",
     "exportCsv": "Exportar CSV",
     "noSkus": "No hay SKUs registrados",
-    "unpublishedBanner": "Estos SKUs están en SkuBeam pero no en Shopify. Pueden venir de una migración WooCommerce o creados manualmente."
+    "unpublishedBanner": "Estos SKUs están sincronizados desde Bsale pero aún no han sido publicados en tu tienda Shopify. Selecciónalos y haz clic en Publicar para crearlos en Shopify."
   },
   "forecast": {
     "title": "Forecast & Reposición",

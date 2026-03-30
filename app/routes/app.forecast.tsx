@@ -1,11 +1,12 @@
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { Form, useFetcher, useLoaderData, useNavigate, useNavigation, useRevalidator } from "react-router";
 import { useEffect, useRef } from "react";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import {
   getForecastForShop,
-  hasSalesData,
+  getSalesCount,
   saveForecastConfig,
 } from "../models/forecast.server";
 import { getActiveSyncJob } from "../models/sync.server";
@@ -52,9 +53,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const statusFilter = url.searchParams.get("status") ?? "";
   const page = Math.max(1, Number(url.searchParams.get("page") ?? "1"));
 
-  const [{ rows: allRows, config }, salesData, activeJob] = await Promise.all([
+  const [{ rows: allRows, config }, salesCount, activeJob] = await Promise.all([
     getForecastForShop(shopId),
-    hasSalesData(shopId),
+    getSalesCount(shopId),
     getActiveSyncJob(shopId),
   ]);
 
@@ -64,7 +65,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const atRiskValue = allRows
     .filter((r) => r.status === "critical" || r.status === "low")
-    .reduce((sum, r) => sum + r.total_stock * (r.cost_price ?? 0), 0);
+    .reduce((sum, r) => sum + r.total_stock * (r.sale_price ?? r.cost_price ?? 0), 0);
 
   const filtered   = statusFilter ? allRows.filter((r) => r.status === statusFilter) : allRows;
   const total      = filtered.length;
@@ -73,7 +74,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   return {
     rows, total, page, totalPages,
-    config, salesData, activeJob,
+    config, salesCount, activeJob,
     statusFilter,
     criticalCount, lowCount, deadCount, atRiskValue,
   };
@@ -184,7 +185,7 @@ const LABEL_STYLE: React.CSSProperties = {
 export default function ForecastPage() {
   const {
     rows, total, page, totalPages,
-    config, salesData, activeJob,
+    config, salesCount,
     statusFilter,
     criticalCount, lowCount, deadCount, atRiskValue,
   } = useLoaderData<typeof loader>();
@@ -192,34 +193,25 @@ export default function ForecastPage() {
   const navigate      = useNavigate();
   const navigation    = useNavigation();
   const shopifyParams = useShopifyParams();
+  const shopify       = useAppBridge();
 
-  const startFetcher  = useFetcher<{ job: { id: string; status: string; type: string } }>();
-  const statusFetcher = useFetcher<{ status: string | null; records_processed: number }>();
-  const revalidator   = useRevalidator();
-  const pollRef       = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startFetcher = useFetcher<{ ok: boolean; imported: number; needsReinstall?: boolean; error?: string | null }>();
+  const revalidator  = useRevalidator();
 
-  const jobId =
-    (startFetcher.data?.job?.type === "orders_sync" ? startFetcher.data.job.id : null)
-    ?? activeJob?.id;
-
-  const polledStatus = statusFetcher.data?.status;
-  const isRunning    = !!jobId && polledStatus !== "completed" && polledStatus !== "failed";
-  const isLoading    = navigation.state === "loading";
+  const isRunning = startFetcher.state !== "idle";
+  const isLoading = navigation.state === "loading";
 
   useEffect(() => {
-    if (!jobId) return;
-    pollRef.current = setInterval(() => {
-      statusFetcher.load(`/api/sync/status?jobId=${jobId}`);
-    }, 3000);
-    return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
-  }, [jobId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (polledStatus === "completed" || polledStatus === "failed") {
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    if (startFetcher.state !== "idle") return;
+    const d = startFetcher.data;
+    if (!d) return;
+    if (d.ok) {
       revalidator.revalidate();
+      shopify.toast.show(`Se importaron ${d.imported} registros de ventas`);
+    } else if (d.needsReinstall) {
+      shopify.toast.show("Necesitas reinstalar la app para activar esta función", { isError: true });
     }
-  }, [polledStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [startFetcher.state, startFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const hasReplenishmentItems = criticalCount + lowCount > 0;
 
@@ -390,7 +382,7 @@ export default function ForecastPage() {
                     {row.daily_velocity > 0 ? row.reorder_point : "—"}
                   </span>
                   <span style={{ padding: "0 8px", fontSize: "var(--p-font-size-350, 0.875rem)" }}>
-                    {row.days_left !== null ? `${row.days_left}d` : "—"}
+                    {row.days_left !== null && row.days_left > 0 ? `${row.days_left}d` : "—"}
                   </span>
                   <span style={{ padding: "0 8px" }}>
                     <s-badge tone={statusTone(row.status)}>
@@ -487,34 +479,47 @@ export default function ForecastPage() {
               {isRunning ? (
                 <s-stack direction="block" gap="small">
                   <s-spinner />
-                  <s-text>
-                    Importando órdenes…
-                    {(statusFetcher.data?.records_processed ?? 0) > 0
-                      ? ` (${statusFetcher.data!.records_processed} líneas)`
-                      : ""}
-                  </s-text>
+                  <s-text>Importando órdenes…</s-text>
                 </s-stack>
               ) : (
                 <s-stack direction="block" gap="small">
-                  {salesData ? (
-                    <s-badge tone="success">Datos importados</s-badge>
+                  {salesCount > 0 ? (
+                    <s-badge tone="success">{salesCount.toLocaleString()} registros importados</s-badge>
                   ) : (
                     <s-text color="subdued">
-                      Sin historial. Importa para calcular velocidad y reorder points.
+                      Sin historial de ventas. Importa para calcular velocidad y reorder points.
                     </s-text>
                   )}
-                  <startFetcher.Form method="post" action="/api/sync">
-                    <input type="hidden" name="type" value="orders" />
-                    <s-button
-                      type="submit"
-                      variant="secondary"
-                      {...(startFetcher.state !== "idle" ? { loading: true } : {})}
+                  {salesCount === 0 && (
+                    <s-text color="subdued">
+                      Paso 1: sincroniza SKUs desde Bsale → Paso 2: importa el historial de ventas aquí.
+                    </s-text>
+                  )}
+                  <s-button
+                    variant={salesCount > 0 ? "secondary" : "primary"}
+                    {...(startFetcher.state !== "idle" ? { loading: true } : {})}
+                    onClick={() =>
+                      startFetcher.submit(
+                        {},
+                        { method: "post", action: "/api/sync/sales-history" },
+                      )
+                    }
+                  >
+                    {startFetcher.state !== "idle"
+                      ? "Importando…"
+                      : salesCount > 0 ? "Re-importar historial" : "Importar historial de ventas (último año)"}
+                  </s-button>
+                  {startFetcher.data?.ok === false && (
+                    <s-banner
+                      tone="critical"
+                      heading={startFetcher.data.needsReinstall
+                        ? "Permiso faltante: reinstala la app"
+                        : "La importación falló. Intenta de nuevo."}
                     >
-                      {salesData ? "Re-importar historial" : "Importar historial de ventas"}
-                    </s-button>
-                  </startFetcher.Form>
-                  {polledStatus === "failed" && (
-                    <s-banner tone="critical" heading="La importación falló. Intenta de nuevo." />
+                      {startFetcher.data.needsReinstall
+                        ? "Ve a la App Store de Shopify, desinstala y vuelve a instalar SkuBeam para autorizar el permiso read_orders."
+                        : (startFetcher.data.error ?? "")}
+                    </s-banner>
                   )}
                 </s-stack>
               )}

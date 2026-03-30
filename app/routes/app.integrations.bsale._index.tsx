@@ -138,7 +138,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { jobId: job.id, jobType: "bsale_products" as const };
   }
   if (intent === "sync_stock") {
+    console.log("[stock-sync] action called, intent:", intent);
+    console.log("[stock-sync] shop:", shopId);
+    console.log("[stock-sync] bsale_token exists:", !!shop?.bsale_token);
     const job = await createBsaleJob(shopId, "bsale_stock");
+    console.log("[stock-sync] job created:", job.id);
     return { jobId: job.id, jobType: "bsale_stock" as const };
   }
 

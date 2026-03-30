@@ -36,8 +36,10 @@ export async function syncBsaleStockToSkuBeam(
   shopId:     string,
   bsaleToken: string | null | undefined,
 ): Promise<{ synced: number; errors: number }> {
+  console.log("[stock-sync] calling Bsale /stocks.json");
   // Fetch Bsale stock records
   const stocks = await getBsaleStocks(bsaleToken);
+  console.log("[stock-sync] stocks received:", stocks.length);
 
   // Log first raw stock record to verify API field names
   if (stocks.length > 0) {
@@ -59,6 +61,7 @@ export async function syncBsaleStockToSkuBeam(
     ),
   ];
 
+  console.log("[stock-sync] unique sku_codes from Bsale:", skuCodes.length);
   if (skuCodes.length === 0) return { synced: 0, errors: 0 };
 
   // Resolve sku_code → sku UUID for this shop
@@ -69,6 +72,7 @@ export async function syncBsaleStockToSkuBeam(
     .in("sku_code", skuCodes);
 
   if (skuErr) throw new Error(`[syncBsaleStockToSkuBeam] lookup: ${skuErr.message}`);
+  console.log("[stock-sync] skus matched in Supabase:", skuRows?.length ?? 0);
 
   const skuMap = new Map<string, string>(
     (skuRows ?? []).map((r) => [r.sku_code, r.id]),
@@ -96,8 +100,10 @@ export async function syncBsaleStockToSkuBeam(
     });
   }
 
+  console.log("[stock-sync] rows to upsert:", rows.length);
   for (let i = 0; i < rows.length; i += 200) {
     const batch = rows.slice(i, i + 200);
+    console.log("[stock-sync] upserting inventory_levels batch:", batch.length);
     const { error } = await supabaseAdmin
       .from("inventory_levels")
       .upsert(batch, { onConflict: "sku_id,shopify_location_id" });

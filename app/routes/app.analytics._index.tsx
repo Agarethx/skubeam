@@ -260,11 +260,7 @@ export default function AnalyticsPage() {
   const navigate      = useNavigate();
   const shopifyParams = useShopifyParams();
 
-  const maxVelocity      = velocityRows.length > 0 ? velocityRows[0].daily_velocity : 1;
-  const costCoveragePct  = kpis.active_skus > 0
-    ? Math.round((kpis.skus_with_cost / kpis.active_skus) * 100)
-    : 100;
-  const showCostWarning  = costCoveragePct < 100;
+  const maxVelocity = velocityRows.length > 0 ? velocityRows[0].daily_velocity : 1;
 
   function abcPageUrl(p: number): string {
     return p > 1 ? `?abcPage=${p}` : "?";
@@ -281,15 +277,23 @@ export default function AnalyticsPage() {
         </s-banner>
       )}
 
-      {/* Cost coverage warning */}
-      {showCostWarning && (
+      {/* Zero-state: SKUs exist but no stock synced yet */}
+      {kpis.active_skus > 0 && kpis.total_stock === 0 && (
         <s-banner
-          tone="warning"
-          heading={`Solo el ${costCoveragePct}% de tus SKUs tiene costo registrado — las métricas financieras son estimaciones parciales.`}
+          tone="info"
+          heading="Sin datos de stock aún"
         >
-          <s-link href={`/app/skus${shopifyParams}`}>
-            Agrega el costo a tus SKUs para ver métricas reales
-          </s-link>
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              Sincroniza el stock desde Bsale para ver métricas completas de inventario.
+            </s-paragraph>
+            <s-button
+              variant="secondary"
+              onClick={() => navigate(`/app/integrations/bsale${shopifyParams}`)}
+            >
+              Sincronizar stock desde Bsale
+            </s-button>
+          </s-stack>
         </s-banner>
       )}
 

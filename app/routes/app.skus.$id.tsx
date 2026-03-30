@@ -33,6 +33,7 @@ export const loader = async ({ request, params }: LoaderFunctionArgs) => {
     getInventoryLevels(session.shop, id),
   ]);
 
+  console.log("[sku-detail] sale_price:", sku?.sale_price);
   const { score, criteria } = computeHealthScore(sku, analytics);
 
   const barcodeDataUrl = sku.barcode
@@ -58,9 +59,6 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
     const barcode = (formData.get("barcode") as string).trim() || null;
     const barcodeType = (formData.get("barcode_type") as string) || "CODE128";
     const vendor = (formData.get("vendor") as string).trim() || null;
-    const costRaw = formData.get("cost_price") as string;
-    const costPrice = costRaw ? parseFloat(costRaw) : null;
-
     if (!skuCode) return { error: "El código SKU es obligatorio." };
 
     await updateSku(session.shop, id, {
@@ -68,7 +66,6 @@ export const action = async ({ request, params }: ActionFunctionArgs) => {
       barcode,
       barcode_type: barcodeType,
       vendor,
-      cost_price: costPrice,
     });
     return { success: "SKU actualizado correctamente." };
   }
@@ -329,12 +326,11 @@ export default function SkuDetail() {
               label="Vendor"
               value={sku.vendor ?? ""}
             />
-            <s-number-field
-              name="cost_price"
-              label="Costo (precio)"
-              value={sku.cost_price != null ? String(sku.cost_price) : ""}
-              min={0}
-              step={0.01}
+            <s-text-field
+              label="Precio de venta (Bsale)"
+              value={sku.sale_price ? `${Number(sku.sale_price).toLocaleString("es-CL")}` : ""}
+              readOnly
+              help-text="El precio se sincroniza desde la lista de precios de Bsale"
             />
             <s-button type="submit" {...(isSaving ? { loading: true } : {})}>
               Guardar cambios

@@ -1,7 +1,7 @@
 # SkuBeam — Shopify App Config
 client_id = "ae04a4fc032b3a441af7cdde23c94465"
 name = "skubeam"
-application_url = "https://example.com"
+application_url = "https://congressional-strong-length-chances.trycloudflare.com"
 embedded = true
 
 [build]
@@ -22,4 +22,4 @@ api_version = "2026-04"
 scopes = "read_products,write_products,read_inventory,write_inventory,read_orders,write_orders,read_locations"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://congressional-strong-length-chances.trycloudflare.com/api/auth" ]

@@ -92,13 +92,16 @@ export async function processBsaleStockJob(
   jobId:  string,
   shopId: string,
 ): Promise<void> {
+  console.log("[stock-sync] processBsaleStockJob start — jobId:", jobId, "shop:", shopId);
   try {
     const token  = await resolveShopToken(shopId);
+    console.log("[stock-sync] token resolved, length:", token.length);
     const result = await syncBsaleStockToSkuBeam(shopId, token);
+    console.log("[stock-sync] syncBsaleStockToSkuBeam done — synced:", result.synced, "errors:", result.errors);
     await completeJob(jobId, result.synced);
     await stampLastSync(shopId);
   } catch (err) {
-    console.error("[processBsaleStockJob]", err);
+    console.error("[stock-sync] processBsaleStockJob ERROR:", err);
     await failJob(jobId, err);
   }
 }

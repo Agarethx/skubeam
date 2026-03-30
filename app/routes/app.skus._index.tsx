@@ -48,14 +48,23 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const page   = Math.max(1, Number(url.searchParams.get("page") ?? "1"));
   const tab    = url.searchParams.get("tab") ?? "";
 
-  const [result, activeSyncJob, unpublishedCount, unpublishedSkus] = await Promise.all([
+  const [result, activeSyncJob, unpublishedCount, unpublishedResult] = await Promise.all([
     tab === "unpublished" ? Promise.resolve({ skus: [], total: 0, page: 1, pageSize: 50, totalPages: 0 }) : listSkus(session.shop, { search, status, page }),
     getActiveSyncJob(session.shop),
     getUnpublishedCount(session.shop),
-    tab === "unpublished" ? listUnpublishedSkus(session.shop).then((r) => r.skus) : Promise.resolve([] as SkuDetail[]),
+    tab === "unpublished"
+      ? listUnpublishedSkus(session.shop, { search, page })
+      : Promise.resolve({ skus: [] as SkuDetail[], total: 0 }),
   ]);
 
-  return { ...result, search, status, tab, activeSyncJob, unpublishedCount, unpublishedSkus };
+  const unpublishedSkus        = unpublishedResult.skus;
+  const unpublishedTotal       = unpublishedResult.total;
+  const unpublishedTotalPages  = Math.ceil(unpublishedTotal / 50);
+
+  return {
+    ...result, search, status, tab, activeSyncJob,
+    unpublishedCount, unpublishedSkus, unpublishedTotal, unpublishedTotalPages,
+  };
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -86,39 +95,84 @@ async function downloadBlob(url: string, filename: string) {
 // ── Sync progress banner ─────────────────────────────────────────────────────
 
 function SyncProgressBanner({ job }: { job: SyncJob }) {
-  const fetcher = useFetcher<{ job: SyncJob | null }>();
+  const pollFetcher   = useFetcher<{ job: SyncJob | null }>();
+  const cancelFetcher = useFetcher<{ ok: boolean }>();
   const { revalidate } = useRevalidator();
 
   useEffect(() => {
     if (job.status !== "running" && job.status !== "pending") return;
-    const interval = setInterval(() => { fetcher.load("/api/sync"); }, 5000);
+    const interval = setInterval(() => { pollFetcher.load("/api/sync"); }, 5000);
     return () => clearInterval(interval);
   }, [job.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (fetcher.data?.job?.status === "completed") revalidate();
-  }, [fetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (pollFetcher.data?.job?.status === "completed" || pollFetcher.data?.job?.status === "cancelled") {
+      revalidate();
+    }
+  }, [pollFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const polledJob = fetcher.data?.job ?? job;
-  const processed = polledJob.records_processed ?? 0;
+  const polledJob  = pollFetcher.data?.job ?? job;
+  const processed  = polledJob.records_processed ?? 0;
+  const isBulk     = polledJob.type === "bulk_publish";
+  const total      = isBulk ? ((polledJob.payload as { total?: number } | null)?.total ?? 0) : 0;
+  const isCancelling = cancelFetcher.state !== "idle";
 
   if (polledJob.status === "failed") {
     return (
       <s-banner tone="critical" heading="Error en la sincronización">
-        <s-paragraph>
-          {polledJob.error_message ?? "Se produjo un error desconocido."}
-        </s-paragraph>
+        <s-paragraph>{polledJob.error_message ?? "Se produjo un error desconocido."}</s-paragraph>
       </s-banner>
     );
   }
 
+  if (polledJob.status === "cancelled") {
+    return <s-banner tone="warning" heading="Publicación cancelada." />;
+  }
+
+  const heading = isBulk
+    ? total > 0
+      ? `Publicando ${processed} de ${total} SKUs en Shopify…`
+      : `Publicando SKUs en Shopify… (${processed} listos)`
+    : "Sincronizando productos desde Shopify…";
+
+  const body = isBulk
+    ? "Este proceso puede tardar varios minutos. Puedes cancelarlo en cualquier momento."
+    : processed > 0
+      ? `${processed} objetos procesados. Esto puede tardar unos minutos.`
+      : "Iniciando operación bulk… esto puede tardar unos minutos.";
+
   return (
-    <s-banner tone="info" heading="Sincronizando productos desde Shopify…">
-      <s-paragraph>
-        {processed > 0
-          ? `${processed} objetos procesados. Esto puede tardar unos minutos.`
-          : "Iniciando operación bulk… esto puede tardar unos minutos."}
-      </s-paragraph>
+    <s-banner tone="info" heading={heading}>
+      <s-stack direction="block" gap="base">
+        <s-paragraph>{body}</s-paragraph>
+        {isBulk && total > 0 && (
+          <div style={{
+            height: "8px", background: "var(--p-color-bg-surface-secondary, #e4e5e7)",
+            borderRadius: "4px", overflow: "hidden",
+          }}>
+            <div style={{
+              width: `${Math.min((processed / total) * 100, 100)}%`,
+              height: "100%",
+              background: "var(--p-color-bg-fill-emphasis, #008060)",
+              borderRadius: "4px",
+              transition: "width 0.5s ease",
+            }} />
+          </div>
+        )}
+        {isBulk && (
+          <cancelFetcher.Form method="post" action="/api/cancel-job">
+            <input type="hidden" name="jobId" value={polledJob.id ?? ""} />
+            <s-button
+              type="submit"
+              tone="critical"
+              variant="secondary"
+              {...(isCancelling ? { loading: true } : {})}
+            >
+              Cancelar publicación
+            </s-button>
+          </cancelFetcher.Form>
+        )}
+      </s-stack>
     </s-banner>
   );
 }
@@ -164,7 +218,11 @@ function UnpublishedSkuRow({
       <span style={{ fontWeight: 600, ...CELL }}>{sku.sku_code}</span>
       <span style={CELL_TRUNCATE}>{sku.title ?? "—"}</span>
       <span style={CELL_TRUNCATE}>{sku.vendor ?? "—"}</span>
-      <span style={CELL}>{sku.cost_price != null ? `$${sku.cost_price}` : "—"}</span>
+      <span style={CELL}>
+        {sku.sale_price != null
+          ? `$${Number(sku.sale_price).toLocaleString("es-CL")}`
+          : <s-badge tone="warning">Sin precio</s-badge>}
+      </span>
       <span style={{ ...CELL, color: "var(--p-color-text-subdued, #6d7175)" }}>
         {sku.created_at ? new Date(sku.created_at).toLocaleDateString("es-MX") : "—"}
       </span>
@@ -193,8 +251,10 @@ function UnpublishedSkuRow({
 // ── Page component ────────────────────────────────────────────────────────────
 
 export default function SkusIndex() {
-  const { skus, total, page, totalPages, search, status, tab, activeSyncJob, unpublishedCount, unpublishedSkus } =
-    useLoaderData<typeof loader>();
+  const {
+    skus, total, page, totalPages, search, status, tab, activeSyncJob,
+    unpublishedCount, unpublishedSkus, unpublishedTotal, unpublishedTotalPages,
+  } = useLoaderData<typeof loader>();
 
   const navigation    = useNavigation();
   const navigate      = useNavigate();
@@ -203,6 +263,8 @@ export default function SkusIndex() {
   const [localSearch, setLocalSearch] = useState(search);
   const [hiddenIds, setHiddenIds]     = useState<Set<string>>(new Set());
   const { revalidate }                = useRevalidator();
+
+  const visibleUnpublished = (unpublishedSkus as SkuDetail[]).filter((s) => !hiddenIds.has(s.id));
 
   function handlePublished(id: string) {
     setHiddenIds((prev) => new Set([...prev, id]));
@@ -284,36 +346,80 @@ export default function SkusIndex() {
               </s-paragraph>
             </s-banner>
 
-            {unpublishedSkus.length === 0 ? (
+            {unpublishedCount === 0 ? (
               <s-paragraph>No hay SKUs sin publicar. ✓</s-paragraph>
             ) : (
-              <div style={{ border: "1px solid var(--p-color-border, #e1e3e5)", borderRadius: "var(--p-border-radius-200, 8px)", overflow: "hidden" }}>
-                {/* Header */}
-                <div style={{
-                  display: "grid",
-                  gridTemplateColumns: "200px 1fr 120px 90px 130px 100px",
-                  padding: "8px 16px",
-                  background: "var(--p-color-bg-surface-secondary, #f6f6f7)",
-                  borderBottom: "1px solid var(--p-color-border, #e1e3e5)",
-                }}>
-                  {(["SKU", "Nombre", "Vendor", "Costo", "Creado", ""] as const).map((label, i) => (
-                    <span key={i} style={{ fontSize: "var(--p-font-size-300, 0.75rem)", fontWeight: 600, color: "var(--p-color-text-subdued, #6d7175)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
-                      {label}
-                    </span>
-                  ))}
+              <s-stack direction="block" gap="base">
+                {/* Search — reuses localSearch + debounced navigate (tab preserved in URL) */}
+                <div style={{ maxWidth: "320px" }}>
+                  <s-search-field
+                    label="Buscar SKU"
+                    label-accessibility-visibility="hidden"
+                    placeholder="Buscar por código o título…"
+                    value={localSearch}
+                    onInput={(e: Event) =>
+                      setLocalSearch((e.target as HTMLInputElement).value)
+                    }
+                  />
                 </div>
-                {/* Rows */}
-                {(unpublishedSkus as SkuDetail[])
-                  .filter((s) => !hiddenIds.has(s.id))
-                  .map((sku, idx) => (
-                    <UnpublishedSkuRow
-                      key={sku.id}
-                      sku={sku}
-                      idx={idx}
-                      onPublished={handlePublished}
-                    />
-                  ))}
-              </div>
+
+                {visibleUnpublished.length === 0 && search ? (
+                  <s-paragraph>No se encontraron SKUs con esa búsqueda.</s-paragraph>
+                ) : visibleUnpublished.length === 0 ? (
+                  <s-paragraph>No hay SKUs sin publicar. ✓</s-paragraph>
+                ) : (
+                  <div style={{ border: "1px solid var(--p-color-border, #e1e3e5)", borderRadius: "var(--p-border-radius-200, 8px)", overflow: "hidden" }}>
+                    {/* Header */}
+                    <div style={{
+                      display: "grid",
+                      gridTemplateColumns: "200px 1fr 120px 90px 130px 100px",
+                      padding: "8px 16px",
+                      background: "var(--p-color-bg-surface-secondary, #f6f6f7)",
+                      borderBottom: "1px solid var(--p-color-border, #e1e3e5)",
+                    }}>
+                      {(["SKU", "Nombre", "Vendor", "Precio", "Creado", ""] as const).map((label, i) => (
+                        <span key={i} style={{ fontSize: "var(--p-font-size-300, 0.75rem)", fontWeight: 600, color: "var(--p-color-text-subdued, #6d7175)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                          {label}
+                        </span>
+                      ))}
+                    </div>
+                    {/* Rows */}
+                    {visibleUnpublished.map((sku, idx) => (
+                      <UnpublishedSkuRow
+                        key={sku.id}
+                        sku={sku}
+                        idx={idx}
+                        onPublished={handlePublished}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* Server-side pagination */}
+                {unpublishedTotalPages > 1 && (
+                  <s-stack direction="inline" justifyContent="space-between" alignItems="center">
+                    <s-text color="subdued">
+                      Página {page} de {unpublishedTotalPages} · {unpublishedTotal} SKU{unpublishedTotal !== 1 ? "s" : ""}
+                    </s-text>
+                    <s-stack direction="inline" gap="small">
+                      <s-button
+                        variant="tertiary"
+                        {...(page <= 1 ? { disabled: true } : {})}
+                        onClick={() => navigate(pageUrl(page - 1))}
+                      >
+                        ← Anterior
+                      </s-button>
+                      <s-button
+                        variant="tertiary"
+                        {...(page >= unpublishedTotalPages ? { disabled: true } : {})}
+                        onClick={() => navigate(pageUrl(page + 1))}
+                      >
+                        Siguiente →
+                      </s-button>
+                    </s-stack>
+                  </s-stack>
+                )}
+              </s-stack>
             )}
           </s-stack>
         </s-section>

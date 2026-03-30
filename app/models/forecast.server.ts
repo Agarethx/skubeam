@@ -18,6 +18,7 @@ export interface ForecastRow {
   reorder_point: number;
   days_left: number | null;
   status: "critical" | "low" | "ok" | "dead";
+  sale_price: number | null;
   cost_price: number | null;
 }
 
@@ -57,7 +58,7 @@ export async function getForecastForShop(shopId: string) {
 
   const { data: analytics, error } = await supabaseAdmin
     .from("sku_analytics")
-    .select("id, sku_code, title, total_stock, sold_30d, sold_90d, cost_price")
+    .select("id, sku_code, title, total_stock, sold_30d, sold_90d, sale_price, cost_price")
     .eq("shop_id", shopId)
     .eq("status", "active")
     .order("sku_code");
@@ -96,6 +97,7 @@ export async function getForecastForShop(shopId: string) {
       daily_velocity: dailyVelocity,
       reorder_point:  reorderPoint,
       days_left:      daysLeft,
+      sale_price:     sku.sale_price != null ? Number(sku.sale_price) : null,
       cost_price:     sku.cost_price != null ? Number(sku.cost_price) : null,
       status,
     };
@@ -122,10 +124,10 @@ export async function getDeadStockSkus(shopId: string) {
 
 // ── Sales history check ────────────────────────────────────────────────────────
 
-export async function hasSalesData(shopId: string): Promise<boolean> {
+export async function getSalesCount(shopId: string): Promise<number> {
   const { count } = await supabaseAdmin
     .from("sales_history")
     .select("id", { count: "exact", head: true })
     .eq("shop_id", shopId);
-  return (count ?? 0) > 0;
+  return count ?? 0;
 }

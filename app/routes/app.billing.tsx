@@ -8,8 +8,8 @@ import { checkBilling, createSubscription } from "../lib/billing.server";
 // ── Loader ────────────────────────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
-  const billing   = await checkBilling(admin);
+  const { admin, session } = await authenticate.admin(request);
+  const billing   = await checkBilling(admin, session.shop);
 
   const url        = new URL(request.url);
   const success    = url.searchParams.get("success") === "1";

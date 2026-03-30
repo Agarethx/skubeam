@@ -6,11 +6,11 @@ export interface ShopKpis {
   active_skus: number;
   units_sold_30d: number;
   total_stock: number;
-  /** SUM(sold_30d × cost_price) — lower-bound revenue proxy for SKUs with cost set */
+  /** SUM(sold_30d × COALESCE(sale_price, cost_price)) */
   estimated_cogs_30d: number;
-  /** SUM(total_stock × cost_price) — inventory value at cost */
+  /** SUM(total_stock × COALESCE(sale_price, cost_price)) */
   estimated_stock_value: number;
-  /** How many active SKUs have cost_price populated */
+  /** How many active SKUs have sale_price or cost_price populated */
   skus_with_cost: number;
   /** Units sold / total stock — 30-day turnover ratio */
   turnover_ratio: number;
@@ -38,11 +38,12 @@ export interface VelocityRow {
 // ── getShopKpis ───────────────────────────────────────────────────────────────
 
 export async function getShopKpis(shopId: string): Promise<ShopKpis> {
-  const { data, error } = await supabaseAdmin
+  const { data, error, count } = await supabaseAdmin
     .from("sku_analytics")
-    .select("total_stock, sold_30d, cost_price")
+    .select("total_stock, sold_30d, cost_price, sale_price", { count: "exact" })
     .eq("shop_id", shopId)
-    .eq("status", "active");
+    .eq("status", "active")
+    .range(0, 9999);
 
   if (error) throw new Error(`getShopKpis: ${error.message}`);
 
@@ -57,15 +58,18 @@ export async function getShopKpis(shopId: string): Promise<ShopKpis> {
   for (const r of rows) {
     const sold  = Number(r.sold_30d   ?? 0);
     const stock = Number(r.total_stock ?? 0);
-    const cost  = r.cost_price != null ? Number(r.cost_price) : null;
+    // COALESCE(sale_price, cost_price) — Bsale SKUs have sale_price; Shopify-only SKUs have cost_price
+    const price = r.sale_price != null ? Number(r.sale_price)
+                : r.cost_price != null ? Number(r.cost_price)
+                : null;
 
     unitsSold30d += sold;
     totalStock   += stock;
 
-    if (cost != null) {
+    if (price != null) {
       skusWithCost++;
-      estCogs30d    += sold  * cost;
-      estStockValue += stock * cost;
+      estCogs30d    += sold  * price;
+      estStockValue += stock * price;
     }
   }
 
@@ -73,7 +77,7 @@ export async function getShopKpis(shopId: string): Promise<ShopKpis> {
     totalStock > 0 ? Math.round((unitsSold30d / totalStock) * 100) / 100 : 0;
 
   return {
-    active_skus:           rows.length,
+    active_skus:           count ?? rows.length,
     units_sold_30d:        unitsSold30d,
     total_stock:           totalStock,
     estimated_cogs_30d:    estCogs30d,
@@ -92,16 +96,27 @@ export async function getShopKpis(shopId: string): Promise<ShopKpis> {
  *   C = remaining 5 %
  */
 export async function getAbcAnalysis(shopId: string): Promise<AbcRow[]> {
-  const { data, error } = await supabaseAdmin
-    .from("sku_analytics")
-    .select("id, sku_code, title, sold_30d")
-    .eq("shop_id", shopId)
-    .eq("status", "active")
-    .order("sold_30d", { ascending: false });
+  // Paginate in batches of 1000 — Supabase caps each response at 1000 rows
+  const allData: Array<{ id: string; sku_code: string; title: string; sold_30d: number | null }> = [];
+  let offset = 0;
 
-  if (error) throw new Error(`getAbcAnalysis: ${error.message}`);
+  while (true) {
+    const { data, error } = await supabaseAdmin
+      .from("sku_analytics")
+      .select("id, sku_code, title, sold_30d")
+      .eq("shop_id", shopId)
+      .eq("status", "active")
+      .order("sold_30d", { ascending: false })
+      .range(offset, offset + 999);
 
-  const rows = (data ?? []).map((r) => ({
+    if (error) throw new Error(`getAbcAnalysis: ${error.message}`);
+    if (!data?.length) break;
+    allData.push(...data);
+    if (data.length < 1000) break;
+    offset += 1000;
+  }
+
+  const rows = allData.map((r) => ({
     id:       r.id,
     sku_code: r.sku_code,
     title:    r.title,

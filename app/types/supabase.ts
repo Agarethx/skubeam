@@ -515,6 +515,7 @@ export type Database = {
           cost_price: number | null
           id: string | null
           last_sold_at: string | null
+          sale_price: number | null
           shop_id: string | null
           sku_code: string | null
           sold_30d: number | null

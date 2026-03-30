@@ -1,1 +1,2 @@
-SELECT shop_id, bsale_price_list_id, bsale_office_id FROM shops WHERE shop_id = '176shop.myshopify.com';
+DELETE FROM shopify_sessions
+WHERE id = 'offline_176shop.myshopify.com';
