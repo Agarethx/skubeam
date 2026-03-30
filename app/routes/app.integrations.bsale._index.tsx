@@ -1,5 +1,5 @@
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Form, useFetcher, useLoaderData, useNavigation, useRevalidator } from "react-router";
+import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useEffect, useRef, useState } from "react";
 import { useSkuBeamNavigate } from "../lib/navigate";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -239,7 +239,6 @@ export default function BsaleIntegrationPage() {
     priceLists, offices,
   } = useLoaderData<typeof loader>();
 
-  const navigation  = useNavigation();
   const revalidator = useRevalidator();
   const navigate    = useSkuBeamNavigate();
 

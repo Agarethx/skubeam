@@ -215,7 +215,8 @@ export async function fetchPriceMap(
   let offset = 0;
   const limit = 50;
 
-  while (true) {
+  let keepGoing = true;
+  while (keepGoing) {
     const data = await get<BsalePage<BsalePriceListDetail>>(
       `/price_lists/${priceListId}/details.json?limit=${limit}&offset=${offset}&expand=[variant]`,
       token,

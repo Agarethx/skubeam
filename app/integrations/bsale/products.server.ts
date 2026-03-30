@@ -75,7 +75,8 @@ export async function syncBsaleToSkuBeam(
   let offset = 0;
   const limit = 50;
 
-  while (true) {
+  let keepGoing = true;
+  while (keepGoing) {
     const data = await get<BsalePage<BsalePriceDetail>>(
       `/price_lists/${priceListId}/details.json?expand=[variant,product]&limit=${limit}&offset=${offset}`,
       token,

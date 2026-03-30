@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { Form, useFetcher, useLoaderData, useNavigate, useNavigation, useRevalidator } from "react-router";
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";

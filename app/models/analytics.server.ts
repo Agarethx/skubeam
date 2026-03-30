@@ -100,7 +100,8 @@ export async function getAbcAnalysis(shopId: string): Promise<AbcRow[]> {
   const allData: Array<{ id: string; sku_code: string; title: string; sold_30d: number | null }> = [];
   let offset = 0;
 
-  while (true) {
+  let keepGoing = true;
+  while (keepGoing) {
     const { data, error } = await supabaseAdmin
       .from("sku_analytics")
       .select("id, sku_code, title, sold_30d")

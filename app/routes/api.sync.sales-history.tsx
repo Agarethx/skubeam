@@ -24,7 +24,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const SKU_PAGE = 1000;
   let skuOffset  = 0;
 
-  while (true) {
+  let keepGoing = true;
+  while (keepGoing) {
     const { data: batch, error: skusError } = await supabaseAdmin
       .from("skus")
       .select("id, sku_code")
