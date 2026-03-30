@@ -2,7 +2,7 @@
 
 client_id = "d239956cfaea4ff831cdc5d8f086c02b"
 name = "Skubeam"
-application_url = "https://example.com"
+application_url = "https://skubeam-staging.up.railway.app"
 embedded = true
 
 [build]
@@ -16,4 +16,4 @@ api_version = "2026-04"
 scopes = "read_inventory,read_locations,read_orders,read_products,write_inventory,write_orders,write_products"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://skubeam-staging.up.railway.app/api/auth" ]
