@@ -14,7 +14,7 @@ COPY . .
 
 RUN pnpm run build
 
-RUN pnpm prune --prod
+RUN pnpm prune --prod --config.confirmModulesPurge=false
 
 ENV NODE_ENV=production
 
