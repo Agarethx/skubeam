@@ -29,6 +29,9 @@ importers:
       '@shopify/app-bridge-react':
         specifier: ^4.2.4
         version: 4.2.10(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@shopify/shopify-api':
+        specifier: ^13.0.0
+        version: 13.0.0
       '@shopify/shopify-app-react-router':
         specifier: ^1.1.0
         version: 1.1.1(react-dom@18.3.1(react@18.3.1))(react-router@7.13.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)
@@ -1361,6 +1364,9 @@ packages:
   '@shopify/admin-api-client@1.1.1':
     resolution: {integrity: sha512-J/cdodM7jmk9yKxHnkrnVHP2Gm70w2dFA4O3ehPvIBsXvK0PwXmiRjQOCCPfyLo442awON5soQ/XuWVSUmZL/g==}
 
+  '@shopify/admin-api-client@1.1.2':
+    resolution: {integrity: sha512-sV5gS8x4kj0KLULlOJkoBzm+tu6tn+1PCK9a6inySv5qtzmf/JxDWtLgaW9vRXeXHo/Sl/p3mBWhY3//fKA8iw==}
+
   '@shopify/api-codegen-preset@1.2.2':
     resolution: {integrity: sha512-NizmrrrxmoIBfrGv/qvrm1ZytkGsFfeaMj14Gj+IDx6JZAK9A72jsTIyQ7DTTKWMPB6F4d7E20dygA7SEYPVEw==}
 
@@ -1382,6 +1388,9 @@ packages:
   '@shopify/graphql-client@1.4.1':
     resolution: {integrity: sha512-/w4Uchx8ueI8gwmJd1ZbbIGndsjfMEFlzmay3P7rya5zj7K308xne/ggIvWDweueIut2qf1A8lI58xQl9Pu22w==}
 
+  '@shopify/graphql-client@1.4.2':
+    resolution: {integrity: sha512-C/fEyx6BZmTGeJv0HSsduhfn5ZbkXk0nePkyo0+xXxorP1I+uvx9pobdFxTfiPnOrh+P6QiKzBgIviksnSo4YA==}
+
   '@shopify/graphql-codegen@0.1.0':
     resolution: {integrity: sha512-G3sSesLj7Czt/J2Bj+XlQ8u4pkfQEt32hsjoS3UGZlf1eAiVw0aBBddp+NI5HqBAi0gM/f7GLRAhG3kktPhZmA==}
     engines: {node: '>=18'}
@@ -1393,6 +1402,10 @@ packages:
 
   '@shopify/shopify-api@12.3.0':
     resolution: {integrity: sha512-zeMhaZq57cM/8ef9edoVgZhzJxju4pQhPLBX93FYuPbR29f4K92KLlI4QZ+JV4qFKONhQewgXrSBuA/ILp2ZRw==}
+    engines: {node: '>=20.0.0'}
+
+  '@shopify/shopify-api@13.0.0':
+    resolution: {integrity: sha512-tf55PjnIoDY6wjv9gJB1FMYoRmalUCdB8ayPLlPwmDUzCRCKfbQdKrBEX1jnKRmSm7EvtjkUSqbI60v0/jAk9Q==}
     engines: {node: '>=20.0.0'}
 
   '@shopify/shopify-app-react-router@1.1.1':
@@ -1407,6 +1420,9 @@ packages:
     resolution: {integrity: sha512-ZL6tV8hccOO1nTLmj5rbzl++SZhgokQ73CY4v30MRTem/IhbneQag3/tUg9rPjAaDrROEyokGeJTgOq2gD+1hg==}
     peerDependencies:
       '@shopify/shopify-api': ^12.0.0
+
+  '@shopify/storefront-api-client@1.0.10':
+    resolution: {integrity: sha512-A0ItFW58L5+y/jnnJDEsmt2YcQSt2BG+pNoQOYRpPBJaOLpTj7A13q1QVrE5XYVGZCA6ZQ6FqAtgosHHrkut0Q==}
 
   '@shopify/storefront-api-client@1.0.9':
     resolution: {integrity: sha512-vgc0ZczMvrbsQQFYcIIONnIiqiafpcMyq5osI8X6PB65DhnmCQEp3kSlXKOjBPzyAWYvp28nLHS0+r4xsp4yQA==}
@@ -5409,6 +5425,10 @@ snapshots:
     dependencies:
       '@shopify/graphql-client': 1.4.1
 
+  '@shopify/admin-api-client@1.1.2':
+    dependencies:
+      '@shopify/graphql-client': 1.4.2
+
   '@shopify/api-codegen-preset@1.2.2(@types/node@22.19.15)(typescript@5.9.3)':
     dependencies:
       '@graphql-codegen/cli': 5.0.7(@parcel/watcher@2.5.6)(@types/node@22.19.15)(graphql@16.13.1)(typescript@5.9.3)
@@ -5448,6 +5468,8 @@ snapshots:
 
   '@shopify/graphql-client@1.4.1': {}
 
+  '@shopify/graphql-client@1.4.2': {}
+
   '@shopify/graphql-codegen@0.1.0(graphql@16.13.1)':
     dependencies:
       '@graphql-codegen/add': 5.0.3(graphql@16.13.1)
@@ -5471,6 +5493,17 @@ snapshots:
       lossless-json: 4.3.0
       tslib: 2.8.1
 
+  '@shopify/shopify-api@13.0.0':
+    dependencies:
+      '@shopify/admin-api-client': 1.1.2
+      '@shopify/graphql-client': 1.4.2
+      '@shopify/storefront-api-client': 1.0.10
+      compare-versions: 6.1.1
+      isbot: 5.1.36
+      jose: 5.10.0
+      lossless-json: 4.3.0
+      tslib: 2.8.1
+
   '@shopify/shopify-app-react-router@1.1.1(react-dom@18.3.1(react@18.3.1))(react-router@7.13.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)':
     dependencies:
       '@shopify/admin-api-client': 1.1.1
@@ -5486,6 +5519,10 @@ snapshots:
   '@shopify/shopify-app-session-storage@4.0.5(@shopify/shopify-api@12.3.0)':
     dependencies:
       '@shopify/shopify-api': 12.3.0
+
+  '@shopify/storefront-api-client@1.0.10':
+    dependencies:
+      '@shopify/graphql-client': 1.4.2
 
   '@shopify/storefront-api-client@1.0.9':
     dependencies:
