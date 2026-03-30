@@ -6,14 +6,16 @@ EXPOSE 3000
 
 WORKDIR /app
 
-ENV NODE_ENV=production
-
 COPY package.json pnpm-lock.yaml ./
 
-RUN pnpm install --frozen-lockfile --prod
+RUN pnpm install --frozen-lockfile
 
 COPY . .
 
 RUN pnpm run build
+
+RUN pnpm prune --prod
+
+ENV NODE_ENV=production
 
 CMD ["pnpm", "run", "docker-start"]
