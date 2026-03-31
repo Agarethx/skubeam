@@ -117,7 +117,7 @@ async function resolveShopifyCtx(shopId: string): Promise<ShopifyCtx | null> {
   const accessToken = sessionData.access_token as string;
 
   const locRes = await fetch(
-    `https://${shopId}/admin/api/2026-04/locations.json`,
+    `https://${shopId}/admin/api/2025-10/locations.json`,
     { headers: { "X-Shopify-Access-Token": accessToken } },
   );
   if (!locRes.ok) {
@@ -141,7 +141,7 @@ async function shopifyGQL(
   variables: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const res = await fetch(
-    `https://${ctx.shopId}/admin/api/2026-04/graphql.json`,
+    `https://${ctx.shopId}/admin/api/2025-10/graphql.json`,
     {
       method:  "POST",
       headers: {
@@ -277,19 +277,25 @@ interface ShopifyProductIds {
  * any error so the migration continues without failing.
  */
 async function createShopifyProductForSku(
-  ctx:      ShopifyCtx,
-  title:    string,
-  vendor:   string | null,
-  skuCode:  string,
-  price:    string | null,
-  stockQty: number | null,
+  ctx:             ShopifyCtx,
+  title:           string,
+  vendor:          string | null,
+  skuCode:         string,
+  price:           string | null,
+  stockQty:        number | null,
+  descriptionHtml: string,
+  images:          WooImage[],
+  categories:      WooCategory[],
+  collectionCache: Map<string, string>,
 ): Promise<ShopifyProductIds | null> {
   try {
     // ── Step 1: productCreate ─────────────────────────────────────────────
     const createRes = await shopifyGQL(ctx, PRODUCT_CREATE_MUTATION, {
       product: {
         title,
-        ...(vendor ? { vendor } : {}),
+        ...(vendor          ? { vendor }          : {}),
+        ...(descriptionHtml ? { descriptionHtml } : {}),
+        tags: ["migrado-woocommerce", ...categories.map((c) => c.name).filter(Boolean)],
       },
     });
 
@@ -318,9 +324,10 @@ async function createShopifyProductForSku(
     const variantGid       = variantNode.id;
     const inventoryItemGid = variantNode.inventoryItem.id;
 
-    // ── Step 2: productVariantsBulkUpdate (SKU + price) ──────────────────
-    // Sets sku via the variant — belt-and-suspenders alongside inventoryItemUpdate below.
-    const variantInput: Record<string, unknown> = { id: variantGid, sku: skuCode };
+    // ── Step 2: productVariantsBulkUpdate (price only) ───────────────────
+    // sku is NOT a valid field on ProductVariantsBulkInput in API 2025-10.
+    // SKU is set via inventoryItemUpdate (Step 3) on the InventoryItem instead.
+    const variantInput: Record<string, unknown> = { id: variantGid };
     if (price) variantInput.price = price;
 
     const updateRes = await shopifyGQL(ctx, VARIANT_UPDATE_MUTATION, {
@@ -335,7 +342,7 @@ async function createShopifyProductForSku(
     }
 
     // ── Step 3: inventoryItemUpdate (tracked: true + sku) ─────────────────
-    // sku on InventoryItemInput is available in 2026-04; tracked enables inventory.
+    // sku on InventoryItemInput is supported in 2025-10; tracked enables inventory.
     const itemUpdateRes = await shopifyGQL(ctx, INVENTORY_ITEM_UPDATE_MUTATION, {
       id:    inventoryItemGid,
       input: { tracked: true, sku: skuCode },
@@ -352,7 +359,7 @@ async function createShopifyProductForSku(
       const inventoryItemNumericId = gidToNumeric(inventoryItemGid);
       const locationNumericId      = gidToNumeric(ctx.locationGid);
       const stockRes = await fetch(
-        `https://${ctx.shopId}/admin/api/2026-04/inventory_levels/set.json`,
+        `https://${ctx.shopId}/admin/api/2025-10/inventory_levels/set.json`,
         {
           method:  "POST",
           headers: {
@@ -374,6 +381,36 @@ async function createShopifyProductForSku(
       }
     }
 
+    // ── Step 4b: assign collections from WooCommerce categories ─────────────
+    const numericProductId = productGid.split("/").pop()!;
+    if (categories.length > 0) {
+      for (const category of categories) {
+        if (!category.name) continue;
+        await getOrCreateCollection(category.name, collectionCache, ctx, numericProductId);
+      }
+    }
+
+    // ── Step 4c: import product images ────────────────────────────────────
+    if (images.length > 0) {
+      console.log("[woo-jobs] importing images for simple product", { sku: skuCode, count: images.length });
+      const mediaRes = await shopifyGQL(ctx, PRODUCT_CREATE_MEDIA_MUTATION, {
+        productId: productGid,
+        media:     images.slice(0, 10).map((img) => ({
+          originalSource:   img.src,
+          mediaContentType: "IMAGE",
+          ...(img.alt ? { alt: img.alt } : {}),
+        })),
+      });
+      const mediaErrors = ((mediaRes as {
+        data?: { productCreateMedia?: { userErrors: Array<{ field: string; message: string }> } };
+      }).data?.productCreateMedia?.userErrors) ?? [];
+      if (mediaErrors.length) {
+        console.warn("[woo-jobs] productCreateMedia userErrors (simple)", { sku: skuCode, mediaErrors });
+      } else {
+        console.log("[woo-jobs] images imported for simple product", { sku: skuCode });
+      }
+    }
+
     return { productGid, variantGid, inventoryItemGid };
   } catch (err) {
     console.error("[woo-jobs] createShopifyProductForSku error", { skuCode, err });
@@ -390,9 +427,10 @@ function wooStatusToSkuStatus(wooStatus: string): string {
 }
 
 async function processSimpleProduct(
-  shopId:     string,
-  product:    WooSimpleProduct,
-  shopifyCtx: ShopifyCtx | null,
+  shopId:          string,
+  product:         WooSimpleProduct,
+  shopifyCtx:      ShopifyCtx | null,
+  collectionCache: Map<string, string>,
 ): Promise<boolean> {
   const skuCode = product.sku || `woo-${product.id}`;
   const price   = product.regular_price || product.price || null;
@@ -419,9 +457,11 @@ async function processSimpleProduct(
 
   // Shopify sync
   if (shopifyCtx) {
-    const vendor = product.categories?.[0]?.name ?? null;
-    const ids    = await createShopifyProductForSku(
+    const vendor          = product.categories?.[0]?.name ?? null;
+    const descriptionHtml = product.description || product.short_description || "";
+    const ids             = await createShopifyProductForSku(
       shopifyCtx, product.name, vendor, skuCode, price, product.stock_quantity,
+      descriptionHtml, product.images, product.categories, collectionCache,
     );
     if (ids) {
       await supabaseAdmin
@@ -600,7 +640,7 @@ async function createShopifyVariableProduct(
     const productNumericId = productGid.split("/").pop()!;
     try {
       const pubRes = await fetch(
-        `https://${ctx.shopId}/admin/api/2026-04/products/${productNumericId}.json`,
+        `https://${ctx.shopId}/admin/api/2025-10/products/${productNumericId}.json`,
         {
           method:  "PUT",
           headers: {
@@ -760,7 +800,7 @@ async function createShopifyVariableProduct(
         const inventoryItemNumericId = gidToNumeric(change.inventoryItemId);
         const locationNumericId      = gidToNumeric(change.locationId);
         const stockRes = await fetch(
-          `https://${ctx.shopId}/admin/api/2026-04/inventory_levels/set.json`,
+          `https://${ctx.shopId}/admin/api/2025-10/inventory_levels/set.json`,
           {
             method:  "POST",
             headers: {
@@ -980,7 +1020,7 @@ async function createShopifyOrder(
 
   try {
     const res = await fetchWithRetry(
-      `https://${ctx.shopId}/admin/api/2026-04/orders.json`,
+      `https://${ctx.shopId}/admin/api/2025-10/orders.json`,
       {
         method:  "POST",
         headers: {
@@ -1158,6 +1198,7 @@ export async function processWooMigration(
             shopId,
             product as WooSimpleProduct,
             shopifyCtx,
+            collectionCache,
           );
           if (ok) synced++;
         } else if (product.type === "variable") {
