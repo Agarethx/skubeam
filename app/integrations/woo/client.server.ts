@@ -140,12 +140,19 @@ async function wooFetch<T>(
 /** Get counts without fetching full data. */
 export async function getWooCounts(
   creds: WooCredentials,
-): Promise<{ productCount: number; orderCount: number }> {
-  const [products, orders] = await Promise.all([
+): Promise<{ productCount: number; orderCount: number; simpleCount: number; variableCount: number }> {
+  const [products, orders, simples, variables] = await Promise.all([
     wooFetch<unknown[]>(creds, "/products", { per_page: "1" }),
     wooFetch<unknown[]>(creds, "/orders",   { per_page: "1" }).catch(() => ({ total: 0, data: [] })),
+    wooFetch<unknown[]>(creds, "/products", { per_page: "1", type: "simple"   }),
+    wooFetch<unknown[]>(creds, "/products", { per_page: "1", type: "variable" }),
   ]);
-  return { productCount: products.total, orderCount: orders.total };
+  return {
+    productCount:  products.total,
+    orderCount:    orders.total,
+    simpleCount:   simples.total,
+    variableCount: variables.total,
+  };
 }
 
 /** Paginate all products (simple + variable, page by page). */

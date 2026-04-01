@@ -1,6 +1,6 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { supabaseAdmin } from "../db.server";
@@ -182,6 +182,8 @@ function PreviewDoneBanner({
 
 // ── Page ──────────────────────────────────────────────────────────────────
 
+type MigrationMode = "preview" | "products" | "orders";
+
 export default function WooCommercePage() {
   const { conn, activeJob, previewDone, previewRecords, productsMigratedAt, ordersMigratedAt } = useLoaderData<typeof loader>();
   const navigate       = useSkuBeamNavigate();
@@ -189,38 +191,74 @@ export default function WooCommercePage() {
   const shopifyParams  = useShopifyParams();
   const migrateAction  = `/api/woo/migrate${shopifyParams}`;
 
-  const analyzeFetcher   = useFetcher<{ productCount?: number; orderCount?: number; error?: string }>();
-  const previewFetcher   = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
-  const productsFetcher  = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
-  const ordersFetcher    = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
-  const statusFetcher    = useFetcher<{ status: string | null; records_processed: number; type: string | null }>();
+  const analyzeFetcher  = useFetcher<{ productCount?: number; orderCount?: number; simpleCount?: number; variableCount?: number; error?: string }>();
+  const previewFetcher  = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
+  const productsFetcher = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
+  const ordersFetcher   = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
+  const statusFetcher   = useFetcher<{ status: string | null; records_processed: number; type: string | null }>();
 
-  // The active job comes from whichever fetcher just submitted, or from the loader (page reload)
-  const activeJobId  = previewFetcher.data?.jobId ?? productsFetcher.data?.jobId ?? ordersFetcher.data?.jobId ?? activeJob?.id ?? null;
-  const polledStatus = statusFetcher.data?.status;
-  const isMigrating  = !!activeJobId && polledStatus !== "completed" && polledStatus !== "failed";
+  // Explicit migration state — avoids stale polledStatus issues when switching jobs.
+  // mode tracks what phase is running so we can show the right label and estimated total.
+  const [activeMigration, setActiveMigration] = useState<{ jobId: string; mode: MigrationMode } | null>(() =>
+    activeJob ? { jobId: activeJob.id, mode: activeJob.type === "woo_migration_preview" ? "preview" : "products" } : null,
+  );
 
-  // Was the in-flight/just-finished job a preview?
-  const isPreviewJob = previewFetcher.data?.preview === true
-    || activeJob?.type === "woo_migration_preview";
+  // Track which jobId the last statusFetcher response belongs to, to avoid
+  // treating a "completed" response for job A as completion of job B.
+  const polledJobIdRef = useRef<string | null>(null);
+  const pollRef        = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Polling
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // When a fetcher returns a new jobId, make it the active migration immediately.
+  useEffect(() => {
+    const jobId = previewFetcher.data?.jobId;
+    if (jobId) setActiveMigration({ jobId, mode: "preview" });
+  }, [previewFetcher.data?.jobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!activeJobId) return;
+    const jobId = productsFetcher.data?.jobId;
+    if (jobId) setActiveMigration({ jobId, mode: "products" });
+  }, [productsFetcher.data?.jobId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const jobId = ordersFetcher.data?.jobId;
+    if (jobId) setActiveMigration({ jobId, mode: "orders" });
+  }, [ordersFetcher.data?.jobId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Start polling when activeMigration changes to a new job.
+  useEffect(() => {
+    if (!activeMigration) return;
+    const { jobId } = activeMigration;
+    // Immediate first poll so the UI responds without waiting 3 s.
+    statusFetcher.load(`/api/sync/status?jobId=${jobId}`);
     pollRef.current = setInterval(() => {
-      statusFetcher.load(`/api/sync/status?jobId=${activeJobId}`);
+      statusFetcher.load(`/api/sync/status?jobId=${jobId}`);
     }, 3000);
     return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
-  }, [activeJobId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeMigration?.jobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Record which jobId this poll response belongs to.
+  const polledStatus = statusFetcher.data?.status;
   useEffect(() => {
-    if (polledStatus === "completed" || polledStatus === "failed") {
+    if (activeMigration && statusFetcher.data) {
+      polledJobIdRef.current = activeMigration.jobId;
+    }
+  }, [statusFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When polling confirms completion/failure for the CURRENT job, finalize.
+  useEffect(() => {
+    if (!activeMigration) return;
+    if (
+      (polledStatus === "completed" || polledStatus === "failed") &&
+      polledJobIdRef.current === activeMigration.jobId
+    ) {
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      setActiveMigration(null);
       revalidator.revalidate();
     }
   }, [polledStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const isMigrating  = !!activeMigration;
+  const isPreviewJob = activeMigration?.mode === "preview";
 
   const isAnalyzing  = analyzeFetcher.state !== "idle";
   const analyzeResult= analyzeFetcher.data;
@@ -228,14 +266,15 @@ export default function WooCommercePage() {
   const tier         = hasAnalysis
     ? pricingTier(analyzeResult.productCount!)
     : conn?.product_count != null ? pricingTier(conn.product_count) : null;
-  const alreadyDone         = !!conn?.migrated_at;
   const productsMigrated    = !!productsMigratedAt;
   const ordersMigrated      = !!ordersMigratedAt;
 
-  // Estimated total for progress bar — single-phase jobs only count their own phase
-  const estimatedTotal = conn
-    ? (conn.product_count ?? 0) + (conn.order_count ?? 0)
-    : null;
+  // Estimated total for progress bar — scoped to the active migration mode.
+  const estimatedTotal = conn && activeMigration ? (
+    activeMigration.mode === "products" ? (conn.product_count ?? 0) :
+    activeMigration.mode === "orders"   ? (conn.order_count   ?? 0) :
+    /* preview */ (conn.product_count ?? 0) + (conn.order_count ?? 0)
+  ) : null;
   const recordsDone  = statusFetcher.data?.records_processed ?? 0;
   const progressPct  = estimatedTotal && estimatedTotal > 0
     ? Math.min(99, Math.round((recordsDone / estimatedTotal) * 100))
@@ -261,12 +300,12 @@ export default function WooCommercePage() {
         <s-stack direction="block" gap="base">
           <Step n={1} label='Configura WooCommerce: ve a WordPress → WooCommerce → Ajustes → Avanzado → REST API y crea una clave con permisos de "Lectura"' done={currentStep > 1} active={currentStep === 1} />
           <Step n={2} label="Pega la URL de tu tienda y las credenciales, luego haz clic en Analizar tienda para ver cuántos productos y órdenes se migrarán" done={currentStep > 2} active={currentStep === 2} />
-          <Step n={3} label="Confirma el plan e inicia la migración. SkuBeam importará todos los productos y (opcionalmente) el historial de ventas de los últimos 12 meses" done={alreadyDone} active={currentStep === 3} />
+          <Step n={3} label="Confirma el plan e inicia la migración. SkuBeam importará todos los productos y (opcionalmente) el historial de ventas de los últimos 12 meses" done={productsMigrated} active={currentStep === 3} />
         </s-stack>
       </s-section>
 
       {/* Full migration complete banner */}
-      {alreadyDone && polledStatus !== "completed" && (
+      {productsMigrated && polledStatus !== "completed" && (
         <s-banner
           tone="success"
           heading={`Migración completada — ${conn.product_count?.toLocaleString("es-CL") ?? "?"} productos importados desde ${conn.url}`}
@@ -329,9 +368,10 @@ export default function WooCommercePage() {
                 <s-spinner />
                 <div style={{ flex: 1 }}>
                   <p style={{ margin: 0, fontWeight: 600, fontSize: "var(--p-font-size-350, 0.875rem)" }}>
-                    {isPreviewJob
-                      ? "Importando muestra de 5 productos y 5 órdenes…"
-                      : "Importando datos de WooCommerce…"}
+                    {activeMigration?.mode === "preview"   ? "Importando muestra de 5 productos y 5 órdenes…" :
+                   activeMigration?.mode === "products"  ? "Migrando productos…" :
+                   activeMigration?.mode === "orders"    ? "Migrando historial de órdenes…" :
+                   "Importando datos de WooCommerce…"}
                   </p>
                   {recordsDone > 0 && (
                     <p style={{ margin: "2px 0 0", fontSize: "var(--p-font-size-300, 0.75rem)", color: "var(--p-color-text-subdued, #6d7175)" }}>
@@ -383,9 +423,16 @@ export default function WooCommercePage() {
               `}</style>
 
               {!isPreviewJob && (
-                <s-text color="subdued">
-                  Este proceso puede tardar varios minutos. Puedes cerrar esta ventana y volver más tarde.
-                </s-text>
+                <s-stack direction="block" gap="small">
+                  <s-text color="subdued">
+                    Este proceso puede tardar entre 10 y 40 minutos dependiendo de la cantidad de productos.
+                    Con catálogos grandes (+1.000 productos) puede demorar más de una hora.
+                  </s-text>
+                  <s-text color="subdued">
+                    Puedes cerrar esta ventana con seguridad — la migración continúa en segundo plano.
+                    Vuelve más tarde para ver el resultado.
+                  </s-text>
+                </s-stack>
               )}
             </s-stack>
           </s-box>
@@ -393,7 +440,7 @@ export default function WooCommercePage() {
       )}
 
       {/* ── Preview done banner (on re-visit, no active analysis) ── */}
-      {previewDone && !alreadyDone && !hasAnalysis && !isMigrating && polledStatus !== "completed" && (
+      {previewDone && !productsMigrated && !hasAnalysis && !isMigrating && polledStatus !== "completed" && (
         <s-section>
           <PreviewDoneBanner
             records={previewRecords}
@@ -438,7 +485,7 @@ export default function WooCommercePage() {
       )}
 
       {/* ── Analyze form ── */}
-      {!isMigrating && !(previewDone && !alreadyDone && !hasAnalysis) && (
+      {!isMigrating && !(previewDone && !productsMigrated && !hasAnalysis) && (
         <s-section heading="Conectar tienda WooCommerce">
           <analyzeFetcher.Form method="post" action="/api/woo/analyze">
             <s-stack direction="block" gap="base">
@@ -505,7 +552,20 @@ export default function WooCommercePage() {
                   <p style={{ margin: 0, fontSize: "var(--p-font-size-750, 1.75rem)", fontWeight: "bold" as React.CSSProperties["fontWeight"] }}>
                     {analyzeResult.productCount!.toLocaleString("es-CL")}
                   </p>
-                  <s-text color="subdued">incluye todas las variantes</s-text>
+                  {analyzeResult.simpleCount != null && analyzeResult.variableCount != null ? (
+                    <s-stack direction="block" gap="extraSmall">
+                      <s-text color="subdued">
+                        {analyzeResult.simpleCount.toLocaleString("es-CL")} simples
+                        {" + "}
+                        {analyzeResult.variableCount.toLocaleString("es-CL")} con variantes
+                      </s-text>
+                      {analyzeResult.variableCount > 0 && (
+                        <s-text color="subdued">el total de SKUs puede ser mayor</s-text>
+                      )}
+                    </s-stack>
+                  ) : (
+                    <s-text color="subdued">incluye todas las variantes</s-text>
+                  )}
                 </s-stack>
               </s-box>
               <s-box padding="large" borderWidth="small" borderRadius="base" background="base">

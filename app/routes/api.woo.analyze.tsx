@@ -25,12 +25,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const creds = { url: storeUrl, consumerKey, consumerSecret };
 
   let productCount: number;
-  let orderCount: number;
+  let orderCount:   number;
+  let simpleCount:  number;
+  let variableCount: number;
 
   try {
-    const counts = await getWooCounts(creds);
-    productCount = counts.productCount;
-    orderCount   = counts.orderCount;
+    const counts  = await getWooCounts(creds);
+    productCount  = counts.productCount;
+    orderCount    = counts.orderCount;
+    simpleCount   = counts.simpleCount;
+    variableCount = counts.variableCount;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("401") || msg.includes("403")) {
@@ -50,10 +54,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         consumer_secret: consumerSecret,
         product_count:   productCount,
         order_count:     orderCount,
+        simple_count:    simpleCount,
+        variable_count:  variableCount,
         analyzed_at:     new Date().toISOString(),
       },
       { onConflict: "shop_id" },
     );
 
-  return { productCount, orderCount };
+  return { productCount, orderCount, simpleCount, variableCount };
 };
