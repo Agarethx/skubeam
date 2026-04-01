@@ -308,7 +308,7 @@ export default function WooCommercePage() {
       {productsMigrated && polledStatus !== "completed" && (
         <s-banner
           tone="success"
-          heading={`Migración completada — ${conn.product_count?.toLocaleString("es-CL") ?? "?"} productos importados desde ${conn.url}`}
+          heading={`Migración completada — ${conn?.product_count?.toLocaleString("es-CL") ?? "?"} productos importados desde ${conn?.url ?? ""}`}
         />
       )}
       {polledStatus === "completed" && !isPreviewJob && (
@@ -553,7 +553,7 @@ export default function WooCommercePage() {
                     {analyzeResult.productCount!.toLocaleString("es-CL")}
                   </p>
                   {analyzeResult.simpleCount != null && analyzeResult.variableCount != null ? (
-                    <s-stack direction="block" gap="extraSmall">
+                    <s-stack direction="block" gap="small-500">
                       <s-text color="subdued">
                         {analyzeResult.simpleCount.toLocaleString("es-CL")} simples
                         {" + "}
