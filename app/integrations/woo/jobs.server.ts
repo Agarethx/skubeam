@@ -1112,8 +1112,8 @@ async function importOrdersForShop(
   for await (const orders of paginateOrders(creds, { preview })) {
     for (const order of orders) {
       // Create order in Shopify (idempotent via processed_webhooks, best-effort).
-      // 500ms delay keeps throughput at ~2 req/s to stay within the REST bucket
-      // (40-request capacity, 2 req/s refill) and avoid 429s entirely.
+      // Sequential with 500ms delay → ~2 req/s, stays within REST bucket
+      // (40-request capacity, 2 req/s refill) without triggering 429s.
       // fetchWithRetry handles Retry-After as a fallback if 429 still occurs.
       if (shopifyCtx) {
         await createShopifyOrder(shopifyCtx, order);
