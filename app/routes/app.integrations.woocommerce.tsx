@@ -354,7 +354,7 @@ export default function WooCommercePage() {
         </s-section>
       )}
 
-      {polledStatus === "failed" && (
+      {polledStatus === "failed" && !activeJob && (
         <s-banner tone="critical" heading="La migración falló. Revisa los logs e inténtalo de nuevo." />
       )}
 

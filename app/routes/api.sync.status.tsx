@@ -24,8 +24,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .eq("id", jobId)
     .maybeSingle();
 
-  // Dead job detection: if running for more than 10 minutes, mark as failed
-  if (data?.status === "running" && data.started_at) {
+  // Dead job detection: if running for more than 10 minutes, mark as failed.
+  // Skipped for woo_migration jobs — those can run for hours due to rate limiting.
+  const isWooJob = data?.type === "woo_migration" || data?.type === "woo_migration_preview";
+  if (!isWooJob && data?.status === "running" && data.started_at) {
     const ageMs = Date.now() - new Date(data.started_at).getTime();
     if (ageMs > 10 * 60 * 1000) {
       await supabaseAdmin
