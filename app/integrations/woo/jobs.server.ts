@@ -1014,7 +1014,7 @@ async function createShopifyOrder(
     .maybeSingle();
 
   if (existing) {
-    console.log("[woo-jobs] shopify order already migrated, skipping", { wooId: order.id });
+    console.log("[woo-jobs] shopify order already exists, skipping", { wooId: order.id });
     return null;
   }
 
@@ -1109,46 +1109,55 @@ async function importOrdersForShop(
 ): Promise<number> {
   let orderCount = 0;
 
+  const BATCH_SIZE = 4;
+
   for await (const orders of paginateOrders(creds, { preview })) {
-    for (const order of orders) {
-      // Create order in Shopify (idempotent, best-effort)
-      if (shopifyCtx) {
-        await createShopifyOrder(shopifyCtx, order);
-        // 500ms throttle — dev stores have a ~5 orders/min REST limit
-        await new Promise((r) => setTimeout(r, 500));
-      }
+    for (let i = 0; i < orders.length; i += BATCH_SIZE) {
+      const batch = orders.slice(i, i + BATCH_SIZE);
 
-      // Save each line item to sales_history in Supabase
-      for (const item of order.line_items) {
-        if (!item.sku) continue;
+      const batchCounts = await Promise.all(batch.map(async (order) => {
+        let count = 0;
 
-        const { data: skuRow } = await supabaseAdmin
-          .from("skus")
-          .select("id")
-          .eq("shop_id", shopId)
-          .eq("sku_code", item.sku)
-          .maybeSingle();
+        // Create order in Shopify (idempotent via processed_webhooks, best-effort)
+        if (shopifyCtx) {
+          await createShopifyOrder(shopifyCtx, order);
+        }
 
-        if (!skuRow) continue;
+        // Save each line item to sales_history in Supabase
+        for (const item of order.line_items) {
+          if (!item.sku) continue;
 
-        const { error } = await supabaseAdmin
-          .from("sales_history")
-          .upsert(
-            {
-              shop_id:              shopId,
-              sku_id:               skuRow.id,
-              quantity_sold:        item.quantity,
-              shopify_line_item_id: -item.id,  // negative = WooCommerce source
-              sold_at:              order.date_created,
-            },
-            { onConflict: "sku_id,shopify_line_item_id", ignoreDuplicates: true },
-          );
+          const { data: skuRow } = await supabaseAdmin
+            .from("skus")
+            .select("id")
+            .eq("shop_id", shopId)
+            .eq("sku_code", item.sku)
+            .maybeSingle();
 
-        if (!error) orderCount++;
-      }
+          if (!skuRow) continue;
+
+          const { error } = await supabaseAdmin
+            .from("sales_history")
+            .upsert(
+              {
+                shop_id:              shopId,
+                sku_id:               skuRow.id,
+                quantity_sold:        item.quantity,
+                shopify_line_item_id: -item.id,  // negative = WooCommerce source
+                sold_at:              order.date_created,
+              },
+              { onConflict: "sku_id,shopify_line_item_id", ignoreDuplicates: true },
+            );
+
+          if (!error) count++;
+        }
+
+        return count;
+      }));
+
+      orderCount += batchCounts.reduce((a, b) => a + b, 0);
+      await updateJobProgress(jobId, baseCount + orderCount);
     }
-
-    await updateJobProgress(jobId, baseCount + orderCount);
   }
 
   return orderCount;
