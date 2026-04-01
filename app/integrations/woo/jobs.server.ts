@@ -1117,7 +1117,7 @@ async function importOrdersForShop(
       // fetchWithRetry handles Retry-After as a fallback if 429 still occurs.
       if (shopifyCtx) {
         await createShopifyOrder(shopifyCtx, order);
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 2000));
       }
 
       // Save each line item to sales_history in Supabase
