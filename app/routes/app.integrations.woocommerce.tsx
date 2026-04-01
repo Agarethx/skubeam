@@ -570,9 +570,9 @@ export default function WooCommercePage() {
                   ) : (
                     <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                       <s-badge tone="success">✓ Productos migrados</s-badge>
-                      <s-text color="subdued" style={{ fontSize: "var(--p-font-size-300, 0.75rem)" }}>
+                      <span style={{ fontSize: "var(--p-font-size-300, 0.75rem)", color: "var(--p-color-text-subdued, #6d7175)" }}>
                         {new Date(productsMigratedAt!).toLocaleDateString("es-CL")}
-                      </s-text>
+                      </span>
                     </div>
                   )}
 
@@ -593,9 +593,9 @@ export default function WooCommercePage() {
                   {ordersMigrated && (
                     <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                       <s-badge tone="success">✓ Órdenes migradas</s-badge>
-                      <s-text color="subdued" style={{ fontSize: "var(--p-font-size-300, 0.75rem)" }}>
+                      <span style={{ fontSize: "var(--p-font-size-300, 0.75rem)", color: "var(--p-color-text-subdued, #6d7175)" }}>
                         {new Date(ordersMigratedAt!).toLocaleDateString("es-CL")}
-                      </s-text>
+                      </span>
                     </div>
                   )}
                 </s-stack>
