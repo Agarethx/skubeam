@@ -1014,7 +1014,7 @@ async function createShopifyOrder(
     .maybeSingle();
 
   if (existing) {
-    console.log("[woo-jobs] shopify order already exists, skipping", { wooId: order.id });
+    console.log("[woo-jobs] orden ya migrada, saltando", { wooId: order.id });
     return null;
   }
 
