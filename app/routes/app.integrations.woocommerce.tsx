@@ -1,6 +1,6 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { supabaseAdmin } from "../db.server";
@@ -15,7 +15,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const [connResult, activeJobResult, shopResult, lastPreviewJobResult] = await Promise.all([
     supabaseAdmin
       .from("woo_connections")
-      .select("url, product_count, order_count, analyzed_at, migrated_at")
+      .select("url, product_count, order_count, analyzed_at, migrated_at, products_migrated_at, orders_migrated_at")
       .eq("shop_id", shopId)
       .maybeSingle(),
 
@@ -51,6 +51,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     activeJob:         activeJobResult.data,
     previewDone:       shopResult.data?.woo_migration_preview ?? false,
     previewRecords:    lastPreviewJobResult.data?.records_processed ?? null,
+    productsMigratedAt: connResult.data?.products_migrated_at ?? null,
+    ordersMigratedAt:   connResult.data?.orders_migrated_at   ?? null,
   };
 };
 
@@ -145,11 +147,11 @@ function PricingCard({ label, price, detail, highlight }: {
 function PreviewDoneBanner({
   records,
   tier,
-  renderMigrateButton,
+  renderMigrateButtons,
 }: {
-  records:             number | null;
-  tier:                { name: string; price: string } | null;
-  renderMigrateButton: () => React.ReactNode;
+  records:              number | null;
+  tier:                 { name: string; price: string } | null;
+  renderMigrateButtons: () => React.ReactNode;
 }) {
   return (
     <div
@@ -171,10 +173,7 @@ function PreviewDoneBanner({
           ¿Todo se ve bien? Migra el catálogo completo{tier && tier.price !== "$0" ? ` por ${tier.price}` : " gratis"}.
         </p>
         <s-stack direction="inline" gap="base" alignItems="center">
-          {renderMigrateButton()}
-          <s-text color="subdued">
-            {tier?.name === "Gratis" ? "Sin costo para tu catálogo" : `Plan ${tier?.name ?? ""} — productos + stock actual`}
-          </s-text>
+          {renderMigrateButtons()}
         </s-stack>
       </s-stack>
     </div>
@@ -184,22 +183,20 @@ function PreviewDoneBanner({
 // ── Page ──────────────────────────────────────────────────────────────────
 
 export default function WooCommercePage() {
-  const { conn, activeJob, previewDone, previewRecords } = useLoaderData<typeof loader>();
+  const { conn, activeJob, previewDone, previewRecords, productsMigratedAt, ordersMigratedAt } = useLoaderData<typeof loader>();
   const navigate       = useSkuBeamNavigate();
   const revalidator    = useRevalidator();
   const shopifyParams  = useShopifyParams();
   const migrateAction  = `/api/woo/migrate${shopifyParams}`;
 
-  const analyzeFetcher = useFetcher<{ productCount?: number; orderCount?: number; error?: string }>();
-  // Separate fetchers so each form has its own submission state
-  const previewFetcher = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
-  const migrateFetcher = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
-  const statusFetcher  = useFetcher<{ status: string | null; records_processed: number; type: string | null }>();
-
-  const [includeOrders, setIncludeOrders] = useState(false);
+  const analyzeFetcher   = useFetcher<{ productCount?: number; orderCount?: number; error?: string }>();
+  const previewFetcher   = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
+  const productsFetcher  = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
+  const ordersFetcher    = useFetcher<{ jobId?: string; preview?: boolean; error?: string }>();
+  const statusFetcher    = useFetcher<{ status: string | null; records_processed: number; type: string | null }>();
 
   // The active job comes from whichever fetcher just submitted, or from the loader (page reload)
-  const activeJobId  = previewFetcher.data?.jobId ?? migrateFetcher.data?.jobId ?? activeJob?.id ?? null;
+  const activeJobId  = previewFetcher.data?.jobId ?? productsFetcher.data?.jobId ?? ordersFetcher.data?.jobId ?? activeJob?.id ?? null;
   const polledStatus = statusFetcher.data?.status;
   const isMigrating  = !!activeJobId && polledStatus !== "completed" && polledStatus !== "failed";
 
@@ -231,11 +228,13 @@ export default function WooCommercePage() {
   const tier         = hasAnalysis
     ? pricingTier(analyzeResult.productCount!)
     : conn?.product_count != null ? pricingTier(conn.product_count) : null;
-  const alreadyDone  = !!conn?.migrated_at;
+  const alreadyDone         = !!conn?.migrated_at;
+  const productsMigrated    = !!productsMigratedAt;
+  const ordersMigrated      = !!ordersMigratedAt;
 
-  // Estimated total for progress bar (products + orders if applicable)
+  // Estimated total for progress bar — single-phase jobs only count their own phase
   const estimatedTotal = conn
-    ? (conn.product_count ?? 0) + (includeOrders ? (conn.order_count ?? 0) : 0)
+    ? (conn.product_count ?? 0) + (conn.order_count ?? 0)
     : null;
   const recordsDone  = statusFetcher.data?.records_processed ?? 0;
   const progressPct  = estimatedTotal && estimatedTotal > 0
@@ -286,18 +285,31 @@ export default function WooCommercePage() {
           <PreviewDoneBanner
             records={statusFetcher.data?.records_processed ?? null}
             tier={tier}
-            renderMigrateButton={() => (
-              <migrateFetcher.Form method="post" action={migrateAction}>
-                <input type="hidden" name="include_orders" value={includeOrders ? "1" : "0"} />
-                <input type="hidden" name="preview" value="0" />
-                <s-button
-                  type="submit"
-                  variant="primary"
-                  {...(migrateFetcher.state !== "idle" ? { loading: true } : {})}
-                >
-                  {tier ? `Migrar todo — ${tier.price}` : "Migrar todo"}
-                </s-button>
-              </migrateFetcher.Form>
+            renderMigrateButtons={() => (
+              <>
+                <productsFetcher.Form method="post" action={migrateAction}>
+                  <input type="hidden" name="mode" value="products" />
+                  <input type="hidden" name="preview" value="0" />
+                  <s-button
+                    type="submit"
+                    variant="primary"
+                    {...(productsFetcher.state !== "idle" ? { loading: true } : {})}
+                  >
+                    {tier ? `Migrar productos — ${tier.price}` : "Migrar productos"}
+                  </s-button>
+                </productsFetcher.Form>
+                <ordersFetcher.Form method="post" action={migrateAction}>
+                  <input type="hidden" name="mode" value="orders" />
+                  <input type="hidden" name="preview" value="0" />
+                  <s-button
+                    type="submit"
+                    variant="secondary"
+                    {...(ordersFetcher.state !== "idle" ? { loading: true } : {})}
+                  >
+                    Migrar órdenes — $149 USD
+                  </s-button>
+                </ordersFetcher.Form>
+              </>
             )}
           />
         </s-section>
@@ -386,18 +398,40 @@ export default function WooCommercePage() {
           <PreviewDoneBanner
             records={previewRecords}
             tier={tier}
-            renderMigrateButton={() => (
-              <migrateFetcher.Form method="post" action={migrateAction}>
-                <input type="hidden" name="include_orders" value={includeOrders ? "1" : "0"} />
-                <input type="hidden" name="preview" value="0" />
-                <s-button
-                  type="submit"
-                  variant="primary"
-                  {...(migrateFetcher.state !== "idle" ? { loading: true } : {})}
-                >
-                  {tier ? `Migrar todo — ${tier.price}` : "Migrar todo"}
-                </s-button>
-              </migrateFetcher.Form>
+            renderMigrateButtons={() => (
+              <>
+                {!productsMigrated ? (
+                  <productsFetcher.Form method="post" action={migrateAction}>
+                    <input type="hidden" name="mode" value="products" />
+                    <input type="hidden" name="preview" value="0" />
+                    <s-button
+                      type="submit"
+                      variant="primary"
+                      {...(productsFetcher.state !== "idle" ? { loading: true } : {})}
+                    >
+                      {tier ? `Migrar productos — ${tier.price}` : "Migrar productos"}
+                    </s-button>
+                  </productsFetcher.Form>
+                ) : (
+                  <s-badge tone="success">✓ Productos migrados</s-badge>
+                )}
+                {productsMigrated && !ordersMigrated && (
+                  <ordersFetcher.Form method="post" action={migrateAction}>
+                    <input type="hidden" name="mode" value="orders" />
+                    <input type="hidden" name="preview" value="0" />
+                    <s-button
+                      type="submit"
+                      variant="secondary"
+                      {...(ordersFetcher.state !== "idle" ? { loading: true } : {})}
+                    >
+                      Migrar órdenes — $149 USD
+                    </s-button>
+                  </ordersFetcher.Form>
+                )}
+                {ordersMigrated && (
+                  <s-badge tone="success">✓ Órdenes migradas</s-badge>
+                )}
+              </>
             )}
           />
         </s-section>
@@ -493,40 +527,21 @@ export default function WooCommercePage() {
               </s-banner>
             )}
 
-            {/* Migration options */}
+            {/* Migration CTAs */}
             <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
               <s-stack direction="block" gap="base">
                 <p style={{ margin: 0, fontSize: "var(--p-font-size-400, 1rem)", fontWeight: "bold" as React.CSSProperties["fontWeight"] }}>
                   Opciones de migración
                 </p>
 
-                <div style={{ display: "flex", alignItems: "flex-start", gap: "12px" }}>
-                  <input
-                    id="include_orders"
-                    type="checkbox"
-                    checked={includeOrders}
-                    onChange={(e) => setIncludeOrders(e.currentTarget.checked)}
-                    style={{ marginTop: "3px", cursor: "pointer" }}
-                  />
-                  <div>
-                    <label htmlFor="include_orders" style={{ cursor: "pointer", fontWeight: 600, fontSize: "var(--p-font-size-350, 0.875rem)" }}>
-                      Incluir historial de órdenes (+$149 USD)
-                    </label>
-                    <p style={{ margin: "4px 0 0", fontSize: "var(--p-font-size-300, 0.75rem)", color: "var(--p-color-text-subdued, #6d7175)" }}>
-                      Importa los últimos 12 meses de ventas para calcular velocity, reorder points y forecast automáticamente.
-                    </p>
-                  </div>
-                </div>
-
-                {(previewFetcher.data?.error || migrateFetcher.data?.error) && (
-                  <s-banner tone="critical" heading={previewFetcher.data?.error ?? migrateFetcher.data?.error} />
+                {(previewFetcher.data?.error || productsFetcher.data?.error || ordersFetcher.data?.error) && (
+                  <s-banner tone="critical" heading={previewFetcher.data?.error ?? productsFetcher.data?.error ?? ordersFetcher.data?.error} />
                 )}
 
-                <s-stack direction="inline" gap="base">
-                  {/* Free preview — uses dedicated previewFetcher */}
+                <s-stack direction="inline" gap="base" alignItems="center">
+                  {/* Free preview — always uses "all" mode internally */}
                   {!previewDone && (
                     <previewFetcher.Form method="post" action={migrateAction}>
-                      <input type="hidden" name="include_orders" value="0" />
                       <input type="hidden" name="preview" value="1" />
                       <s-button
                         type="submit"
@@ -539,19 +554,57 @@ export default function WooCommercePage() {
                     </previewFetcher.Form>
                   )}
 
-                  {/* Full migration — uses dedicated migrateFetcher */}
-                  <migrateFetcher.Form method="post" action={migrateAction}>
-                    <input type="hidden" name="include_orders" value={includeOrders ? "1" : "0"} />
-                    <input type="hidden" name="preview" value="0" />
-                    <s-button
-                      type="submit"
-                      variant="primary"
-                      {...(migrateFetcher.state !== "idle" ? { loading: true } : {})}
-                    >
-                      {tier ? `Migrar todo — ${tier.price}` : "Migrar todo"}
-                    </s-button>
-                  </migrateFetcher.Form>
+                  {/* Botón 1: Migrar productos */}
+                  {!productsMigrated ? (
+                    <productsFetcher.Form method="post" action={migrateAction}>
+                      <input type="hidden" name="mode" value="products" />
+                      <input type="hidden" name="preview" value="0" />
+                      <s-button
+                        type="submit"
+                        variant="primary"
+                        {...(productsFetcher.state !== "idle" ? { loading: true } : {})}
+                      >
+                        {tier ? `Migrar productos — ${tier.price}` : "Migrar productos"}
+                      </s-button>
+                    </productsFetcher.Form>
+                  ) : (
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <s-badge tone="success">✓ Productos migrados</s-badge>
+                      <s-text color="subdued" style={{ fontSize: "var(--p-font-size-300, 0.75rem)" }}>
+                        {new Date(productsMigratedAt!).toLocaleDateString("es-CL")}
+                      </s-text>
+                    </div>
+                  )}
+
+                  {/* Botón 2: Migrar órdenes — solo disponible si productos ya fueron migrados */}
+                  {productsMigrated && !ordersMigrated && (
+                    <ordersFetcher.Form method="post" action={migrateAction}>
+                      <input type="hidden" name="mode" value="orders" />
+                      <input type="hidden" name="preview" value="0" />
+                      <s-button
+                        type="submit"
+                        variant="secondary"
+                        {...(ordersFetcher.state !== "idle" ? { loading: true } : {})}
+                      >
+                        Migrar historial de órdenes — $149 USD
+                      </s-button>
+                    </ordersFetcher.Form>
+                  )}
+                  {ordersMigrated && (
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <s-badge tone="success">✓ Órdenes migradas</s-badge>
+                      <s-text color="subdued" style={{ fontSize: "var(--p-font-size-300, 0.75rem)" }}>
+                        {new Date(ordersMigratedAt!).toLocaleDateString("es-CL")}
+                      </s-text>
+                    </div>
+                  )}
                 </s-stack>
+
+                {productsMigrated && !ordersMigrated && (
+                  <s-text color="subdued">
+                    Importa los últimos 12 meses de ventas para calcular velocity, reorder points y forecast automáticamente.
+                  </s-text>
+                )}
               </s-stack>
             </s-box>
           </s-stack>

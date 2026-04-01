@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import { supabaseAdmin } from "../db.server";
-import { createWooJob, processWooMigration } from "../integrations/woo/jobs.server";
+import { createWooJob, processWooMigration, type WooMigrationMode } from "../integrations/woo/jobs.server";
 
 /**
  * POST /api/woo/migrate
@@ -19,9 +19,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   console.log("[woo-migrate] shopId", shopId);
 
-  const formData      = await request.formData();
-  const includeOrders = formData.get("include_orders") === "1";
-  const preview       = formData.get("preview") === "1";
+  const formData = await request.formData();
+  const preview  = formData.get("preview") === "1";
+  // preview always runs both phases; otherwise use explicit mode (default: "products")
+  const mode: WooMigrationMode = preview
+    ? "all"
+    : (formData.get("mode") as WooMigrationMode | null) ?? "products";
 
   console.log("[woo-migrate] formData", Object.fromEntries(formData));
 
@@ -44,14 +47,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const job = await createWooJob(shopId, preview);
   console.log("[woo-migrate] job created", job.id);
 
-  // TEMP: direct await to surface the full error in logs.
-  // Revert to fire-and-forget once migration is confirmed working.
-  try {
-    await processWooMigration(job.id, shopId, includeOrders, preview);
-    console.log("[woo-migrate] processWooMigration completed");
-  } catch (err) {
-    console.error("[woo-migrate] processWooMigration FAILED", err);
-  }
+  // Fire-and-forget — returns jobId immediately so the client can start polling.
+  // processWooMigration handles its own error logging and marks the job as failed.
+  void processWooMigration(job.id, shopId, mode, preview);
 
   return { jobId: job.id, preview };
 };

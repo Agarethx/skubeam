@@ -1156,14 +1156,16 @@ async function importOrdersForShop(
 
 // ── Main processor ────────────────────────────────────────────────────────────
 
+export type WooMigrationMode = "products" | "orders" | "all";
+
 export async function processWooMigration(
-  jobId:         string,
-  shopId:        string,
-  includeOrders: boolean,
-  preview        = false,
+  jobId:   string,
+  shopId:  string,
+  mode:    WooMigrationMode,
+  preview  = false,
 ): Promise<void> {
   try {
-    console.log("[woo-jobs] processWooMigration start", { jobId, shopId, preview });
+    console.log("[woo-jobs] processWooMigration start", { jobId, shopId, mode, preview });
 
     const [creds, shopifyCtx] = await Promise.all([
       resolveWooCreds(shopId),
@@ -1179,55 +1181,57 @@ export async function processWooMigration(
     }
 
     let synced = 0;
-    // Job-level cache: collection name → Shopify collection numeric ID
     const collectionCache = new Map<string, string>();
 
-    // ── Phase 1: Products ──────────────────────────────────────────────────
-    console.log("[woo-jobs] starting paginateProducts", { preview });
-    let pageCount = 0;
+    // ── Phase 1: Products ─────────────────────────────────────────────────
+    // Runs for mode "products" and "all" (preview always runs all).
+    if (mode !== "orders") {
+      console.log("[woo-jobs] starting paginateProducts", { preview });
+      let pageCount = 0;
 
-    for await (const products of paginateProducts(creds, { preview })) {
-      pageCount++;
-      console.log("[woo-jobs] product page", { page: pageCount, count: products.length });
+      for await (const products of paginateProducts(creds, { preview })) {
+        pageCount++;
+        console.log("[woo-jobs] product page", { page: pageCount, count: products.length });
 
-      for (const product of products) {
-        console.log("[woo-jobs] processing woo product", { id: product.id, type: product.type, name: product.name });
+        for (const product of products) {
+          console.log("[woo-jobs] processing woo product", { id: product.id, type: product.type, name: product.name });
 
-        if (product.type === "simple") {
-          const ok = await processSimpleProduct(
-            shopId,
-            product as WooSimpleProduct,
-            shopifyCtx,
-            collectionCache,
-          );
-          if (ok) synced++;
-        } else if (product.type === "variable") {
-          const varProduct = product as WooVariableProduct;
-          console.log("[woo-jobs] fetching variations for variable product", { id: varProduct.id, name: varProduct.name });
-          const variations = await getVariations(creds, varProduct.id);
-          console.log("[woo-jobs] variations fetched", { count: variations.length });
-          console.log("[woo-jobs] calling processVariableProduct", { productId: varProduct.id, variationCount: variations.length, hasShopifyCtx: !!shopifyCtx });
-          const count = await processVariableProduct(shopId, varProduct, variations, shopifyCtx, collectionCache);
-          synced += count;
-        } else {
-          console.warn("[woo-jobs] unknown product type, skipping", { id: (product as { id: number }).id, type: (product as { type: string }).type });
+          if (product.type === "simple") {
+            const ok = await processSimpleProduct(
+              shopId,
+              product as WooSimpleProduct,
+              shopifyCtx,
+              collectionCache,
+            );
+            if (ok) synced++;
+          } else if (product.type === "variable") {
+            const varProduct = product as WooVariableProduct;
+            console.log("[woo-jobs] fetching variations for variable product", { id: varProduct.id, name: varProduct.name });
+            const variations = await getVariations(creds, varProduct.id);
+            console.log("[woo-jobs] variations fetched", { count: variations.length });
+            console.log("[woo-jobs] calling processVariableProduct", { productId: varProduct.id, variationCount: variations.length, hasShopifyCtx: !!shopifyCtx });
+            const count = await processVariableProduct(shopId, varProduct, variations, shopifyCtx, collectionCache);
+            synced += count;
+          } else {
+            console.warn("[woo-jobs] unknown product type, skipping", { id: (product as { id: number }).id, type: (product as { type: string }).type });
+          }
         }
-      }
 
-      await updateJobProgress(jobId, synced);
-      console.log("[woo-jobs] progress updated", { synced });
+        await updateJobProgress(jobId, synced);
+        console.log("[woo-jobs] progress updated", { synced });
+      }
+      console.log("[woo-jobs] paginateProducts done", { synced });
     }
-    console.log("[woo-jobs] paginateProducts done", { synced });
 
     // ── Phase 2: Orders ───────────────────────────────────────────────────
-    // Preview always imports orders (5 max). Full migration only if opted in.
-    if (preview || includeOrders) {
-      console.log("[woo-jobs] starting importOrdersForShop", { preview, includeOrders });
+    // Runs for mode "orders" and "all". Preview always runs both (5 max each).
+    if (mode !== "products") {
+      console.log("[woo-jobs] starting importOrdersForShop", { mode, preview });
       const orderRecords = await importOrdersForShop(shopId, creds, jobId, synced, preview, shopifyCtx);
       synced += orderRecords;
       console.log("[woo-jobs] importOrdersForShop done", { orderRecords, synced });
     } else {
-      console.log("[woo-jobs] skipping orders (includeOrders=false, preview=false)");
+      console.log("[woo-jobs] skipping orders (mode=products)");
     }
 
     // ── Finalize ──────────────────────────────────────────────────────────
@@ -1241,10 +1245,17 @@ export async function processWooMigration(
         .update({ woo_migration_preview: true })
         .eq("shop_id", shopId);
     } else {
-      console.log("[woo-jobs] stamping migrated_at on woo_connections");
+      const now = new Date().toISOString();
+      const patch: Record<string, string> = {};
+      if (mode === "products" || mode === "all") patch.products_migrated_at = now;
+      if (mode === "orders"   || mode === "all") patch.orders_migrated_at   = now;
+      // Keep legacy migrated_at for backward compat
+      if (mode === "products" || mode === "all") patch.migrated_at = now;
+
+      console.log("[woo-jobs] stamping woo_connections", patch);
       await supabaseAdmin
         .from("woo_connections")
-        .update({ migrated_at: new Date().toISOString() })
+        .update(patch)
         .eq("shop_id", shopId);
     }
 
