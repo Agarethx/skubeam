@@ -999,25 +999,53 @@ async function fetchWithRetry(url: string, options: RequestInit, maxRetries = 3)
   throw new Error("Max retries exceeded on 429");
 }
 
+interface ShopifyOrderResult {
+  shopifyId:  number | null;
+  callLimit:  string | null;  // raw "current/max" header, e.g. "35/40"
+}
+
 async function createShopifyOrder(
   ctx:   ShopifyCtx,
   order: import("./client.server").WooOrder,
-): Promise<number | null> {
+): Promise<ShopifyOrderResult> {
   const dedupeKey = `woo-${order.id}`;
 
-  // Idempotency check — skip if this WooCommerce order was already migrated
-  const { data: existing } = await supabaseAdmin
+  // Step 1 — Idempotency check: skip if already migrated
+  const { data: existing, error: checkError } = await supabaseAdmin
     .from("processed_webhooks")
     .select("id")
     .eq("source", "woo_order_migration")
     .eq("external_id", dedupeKey)
     .maybeSingle();
 
-  if (existing) {
-    console.log("[woo-jobs] orden ya migrada, saltando", { wooId: order.id });
-    return null;
+  if (checkError) {
+    console.error("[woo-jobs] processed_webhooks check failed", { wooId: order.id, error: checkError.message });
+    return { shopifyId: null, callLimit: null };
   }
 
+  if (existing) {
+    console.log("[woo-jobs] orden ya migrada, saltando", { wooId: order.id });
+    return { shopifyId: null, callLimit: null };
+  }
+
+  // Step 2 — Claim the slot BEFORE calling Shopify.
+  // If this insert fails, abort — do not risk creating a duplicate.
+  const { error: claimError } = await supabaseAdmin
+    .from("processed_webhooks")
+    .insert({ source: "woo_order_migration", external_id: dedupeKey });
+
+  if (claimError) {
+    // Unique-constraint violation means another run already claimed this order.
+    if (claimError.code === "23505") {
+      console.log("[woo-jobs] orden ya migrada (race), saltando", { wooId: order.id });
+      return { shopifyId: null, callLimit: null };
+    }
+    console.error("[woo-jobs] processed_webhooks claim failed — abortando para evitar duplicado",
+      { wooId: order.id, error: claimError.message });
+    return { shopifyId: null, callLimit: null };
+  }
+
+  // Step 3 — Create the order in Shopify. Rollback the claim if it fails.
   try {
     const res = await fetchWithRetry(
       `https://${ctx.shopId}/admin/api/2025-10/orders.json`,
@@ -1033,8 +1061,10 @@ async function createShopifyOrder(
             created_at:         order.date_created,
             financial_status:   "paid",
             fulfillment_status: order.status === "completed" ? "fulfilled" : null,
-            source_name:        "WooCommerce",
-            tags:               "migrado-woocommerce",
+            source_name:               "WooCommerce",
+            tags:                      "migrado-woocommerce",
+            send_receipt:              false,
+            send_fulfillment_receipt:  false,
             note:               `Migrado desde WooCommerce. ID original: ${order.id}. Método de pago: ${order.payment_method_title || "N/A"}`,
             note_attributes: [
               { name: "woo_order_id",          value: String(order.id) },
@@ -1073,27 +1103,35 @@ async function createShopifyOrder(
       },
     );
 
+    const callLimit = res.headers.get("X-Shopify-Shop-Api-Call-Limit");
+
     if (!res.ok) {
       const body = await res.text();
-      console.error("[woo-jobs] shopify order create failed", { wooId: order.id, status: res.status, body });
-      return null;
+      console.error("[woo-jobs] shopify order create failed — rolling back claim",
+        { wooId: order.id, status: res.status, body });
+      // Rollback: remove the claim so the next run can retry
+      await supabaseAdmin
+        .from("processed_webhooks")
+        .delete()
+        .eq("source", "woo_order_migration")
+        .eq("external_id", dedupeKey);
+      return { shopifyId: null, callLimit };
     }
 
     const shopifyOrder = await res.json() as { order?: { id: number } };
     const shopifyId = shopifyOrder.order?.id ?? null;
-    console.log("[woo-jobs] shopify order created", { wooId: order.id, shopifyId });
+    console.log("[woo-jobs] shopify order created", { wooId: order.id, shopifyId, callLimit });
+    return { shopifyId: shopifyId ?? null, callLimit };
 
-    // Record in processed_webhooks so re-runs skip it
+  } catch (err) {
+    console.error("[woo-jobs] createShopifyOrder error — rolling back claim", { wooId: order.id, err });
+    // Rollback: remove the claim so the next run can retry
     await supabaseAdmin
       .from("processed_webhooks")
-      .insert({ source: "woo_order_migration", external_id: dedupeKey })
-      .select()
-      .maybeSingle();  // ignore duplicate key errors on concurrent runs
-
-    return shopifyId ?? null;
-  } catch (err) {
-    console.error("[woo-jobs] createShopifyOrder error", { wooId: order.id, err });
-    return null;
+      .delete()
+      .eq("source", "woo_order_migration")
+      .eq("external_id", dedupeKey);
+    return { shopifyId: null, callLimit: null };
   }
 }
 
@@ -1112,12 +1150,23 @@ async function importOrdersForShop(
   for await (const orders of paginateOrders(creds, { preview })) {
     for (const order of orders) {
       // Create order in Shopify (idempotent via processed_webhooks, best-effort).
-      // Sequential with 500ms delay → ~2 req/s, stays within REST bucket
-      // (40-request capacity, 2 req/s refill) without triggering 429s.
-      // fetchWithRetry handles Retry-After as a fallback if 429 still occurs.
+      // Smart throttle: use X-Shopify-Shop-Api-Call-Limit to pace requests.
+      // When <10 slots available in the bucket, wait 500ms per missing slot.
+      // When ≥10 slots available, send immediately (burst mode).
+      // fetchWithRetry handles Retry-After as a hard fallback if 429 occurs.
       if (shopifyCtx) {
-        await createShopifyOrder(shopifyCtx, order);
-        await new Promise((r) => setTimeout(r, 2000));
+        const { callLimit } = await createShopifyOrder(shopifyCtx, order);
+        if (callLimit) {
+          const [current, max] = callLimit.split("/").map(Number);
+          const available = max - current;
+          if (available < 10) {
+            const waitMs = (10 - available) * 500;
+            await new Promise((r) => setTimeout(r, waitMs));
+          }
+        } else {
+          // No header (skipped order or error) — small safety pause
+          await new Promise((r) => setTimeout(r, 200));
+        }
       }
 
       // Save each line item to sales_history in Supabase
