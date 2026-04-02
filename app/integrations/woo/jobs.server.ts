@@ -1048,7 +1048,7 @@ async function createShopifyOrder(
   // Step 3 — Create the order in Shopify. Rollback the claim if it fails.
   try {
     const res = await fetchWithRetry(
-      `https://${ctx.shopId}/admin/api/2025-10/orders.json`,
+      `https://${ctx.shopId}/admin/api/2025-10/orders.json?send_receipt=false&send_fulfillment_receipt=false`,
       {
         method:  "POST",
         headers: {
@@ -1061,10 +1061,8 @@ async function createShopifyOrder(
             created_at:         order.date_created,
             financial_status:   "paid",
             fulfillment_status: order.status === "completed" ? "fulfilled" : null,
-            source_name:               "WooCommerce",
-            tags:                      "migrado-woocommerce",
-            send_receipt:              false,
-            send_fulfillment_receipt:  false,
+            source_name: "WooCommerce",
+            tags:        "migrado-woocommerce",
             note:               `Migrado desde WooCommerce. ID original: ${order.id}. Método de pago: ${order.payment_method_title || "N/A"}`,
             note_attributes: [
               { name: "woo_order_id",          value: String(order.id) },
@@ -1156,17 +1154,17 @@ async function importOrdersForShop(
       // fetchWithRetry handles Retry-After as a hard fallback if 429 occurs.
       if (shopifyCtx) {
         const { callLimit } = await createShopifyOrder(shopifyCtx, order);
+        // Shopify REST limits order creation to ~2 writes/s regardless of bucket.
+        // Always wait 1s (1 order/s) as a floor. Additionally wait if bucket is full.
+        let waitMs = 1000;
         if (callLimit) {
           const [current, max] = callLimit.split("/").map(Number);
           const available = max - current;
           if (available < 10) {
-            const waitMs = (10 - available) * 500;
-            await new Promise((r) => setTimeout(r, waitMs));
+            waitMs = Math.max(waitMs, (10 - available) * 500);
           }
-        } else {
-          // No header (skipped order or error) — small safety pause
-          await new Promise((r) => setTimeout(r, 200));
         }
+        await new Promise((r) => setTimeout(r, waitMs));
       }
 
       // Save each line item to sales_history in Supabase
