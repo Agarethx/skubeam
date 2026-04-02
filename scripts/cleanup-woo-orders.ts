@@ -37,7 +37,7 @@ async function fetchOrders(): Promise<{ id: number }[]> {
     `https://${SHOP}/admin/api/2025-10/orders.json?tag=migrado-woocommerce&status=any&limit=250`;
 
   while (url) {
-    const res = await fetch(url, { headers });
+    const res: Response = await fetch(url, { headers });
     if (!res.ok) {
       throw new Error(`GET orders failed: ${res.status} ${await res.text()}`);
     }
@@ -47,8 +47,8 @@ async function fetchOrders(): Promise<{ id: number }[]> {
     console.log(`[cleanup] fetched ${all.length} orders so far…`);
 
     // Follow Link header for pagination
-    const link = res.headers.get("Link") ?? "";
-    const next = link.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
+    const link: string = res.headers.get("Link") ?? "";
+    const next: string | null = link.match(/<([^>]+)>;\s*rel="next"/)?.[1] ?? null;
     url = next;
 
     if (next) await sleep(DELAY_MS);
