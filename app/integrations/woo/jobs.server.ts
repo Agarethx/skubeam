@@ -1032,7 +1032,7 @@ async function createShopifyOrder(
   // If this insert fails, abort — do not risk creating a duplicate.
   const { error: claimError } = await supabaseAdmin
     .from("processed_webhooks")
-    .insert({ source: "woo_order_migration", external_id: dedupeKey });
+    .insert({ source: "woo_order_migration", external_id: dedupeKey, shop_id: ctx.shopId });
 
   if (claimError) {
     // Unique-constraint violation means another run already claimed this order.
