@@ -55,7 +55,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       .from("shops").select("bsale_token").eq("shop_id", shopId).maybeSingle();
     if (shopRow2?.bsale_token) {
       const body = await (async () => {
-        const { data: s } = await supabaseAdmin
+        await supabaseAdmin
           .from("shopify_sessions").select("access_token").eq("id", `offline_${shopId}`).single();
         const token = shopRow2.bsale_token!;
         const res = await fetch("https://api.bsale.io/v1/document_types.json?state=0&limit=50", {
