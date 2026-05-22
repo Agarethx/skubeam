@@ -70,6 +70,7 @@ interface BsaleFullDocument {
   id:             number;
   officeId?:      number;
   emissionDate?:  number; // Unix timestamp
+  salesId?:       string; // set by SkuBeam on emit_boleta: "shopify_ORDERID"
   document_type?: { id: number; codeSii?: number };
   details?: {
     href?:  string;
@@ -117,21 +118,23 @@ export async function handleShopifyOrderPaid(
   order:  ShopifyOrderPayload,
 ): Promise<void> {
   const orderId = String(order.id);
+  console.log(`[realtime/shopify_order] ── inicio orden=${orderId} shop=${shopId}`);
 
   if (await isAlreadyProcessed(shopId, "shopify", `order_${orderId}`)) {
-    console.log(`[realtime] ORDERS_PAID ${orderId} already processed — skip`);
+    console.log(`[realtime/shopify_order] Orden ${orderId} ya procesada — saltando`);
     return;
   }
 
-  // Get shop's Bsale token
   const { data: shop } = await supabaseAdmin
     .from("shops")
     .select("bsale_token")
     .eq("shop_id", shopId)
     .single();
 
+  console.log(`[realtime/shopify_order] Token Bsale encontrado: ${!!shop?.bsale_token}`);
+
   if (!shop?.bsale_token) {
-    console.log(`[realtime] Shop ${shopId} has no Bsale token — skip order ${orderId}`);
+    console.log(`[realtime/shopify_order] Shop ${shopId} sin token Bsale — marcando procesado`);
     await markProcessed(shopId, "shopify", `order_${orderId}`);
     return;
   }
@@ -142,12 +145,14 @@ export async function handleShopifyOrderPaid(
     .filter((li) => li.variant_id != null)
     .map((li) => li.variant_id!);
 
+  console.log(`[realtime/shopify_order] Variant IDs de la orden:`, variantIds);
+
   if (variantIds.length === 0) {
+    console.log(`[realtime/shopify_order] Sin variant_ids en la orden — saltando`);
     await markProcessed(shopId, "shopify", `order_${orderId}`);
     return;
   }
 
-  // Look up bsale_variant_id for each shopify_variant_id
   const { data: skus } = await supabaseAdmin
     .from("skus")
     .select("shopify_variant_id, bsale_variant_id")
@@ -155,8 +160,13 @@ export async function handleShopifyOrderPaid(
     .in("shopify_variant_id", variantIds)
     .not("bsale_variant_id", "is", null);
 
+  console.log(`[realtime/shopify_order] SKUs con mapeo Bsale encontrados: ${skus?.length ?? 0}`, {
+    mapped: skus?.map((s) => ({ shopify: s.shopify_variant_id, bsale: s.bsale_variant_id })) ?? [],
+  });
+
   if (!skus || skus.length === 0) {
-    console.log(`[realtime] No Bsale-mapped SKUs for order ${orderId}`);
+    console.log(`[realtime/shopify_order] Sin SKUs mapeados a Bsale para orden ${orderId}`);
+    console.log(`[realtime/shopify_order] ⚠ Para que el stock se ajuste en Bsale, sincroniza productos primero`);
     await markProcessed(shopId, "shopify", `order_${orderId}`);
     return;
   }
@@ -168,11 +178,19 @@ export async function handleShopifyOrderPaid(
     }
   }
 
-  // Adjust Bsale stock for each mapped line item
   for (const lineItem of order.line_items) {
     if (!lineItem.variant_id) continue;
     const bsaleVariantId = bsaleMap.get(lineItem.variant_id);
-    if (!bsaleVariantId) continue;
+    if (!bsaleVariantId) {
+      console.log(`[realtime/shopify_order] variant_id=${lineItem.variant_id} sin mapeo Bsale — saltando`);
+      continue;
+    }
+
+    console.log(`[realtime/shopify_order] Ajustando stock Bsale`, {
+      shopifyVariantId: lineItem.variant_id,
+      bsaleVariantId,
+      delta: -lineItem.quantity,
+    });
 
     try {
       await put("/stocks/adjustments.json", token, {
@@ -180,18 +198,14 @@ export async function handleShopifyOrderPaid(
         officeId:  1,
         variantId: bsaleVariantId,
       });
-      console.log(
-        `[realtime] Bsale stock adjusted: variantId=${bsaleVariantId} delta=-${lineItem.quantity}`,
-      );
+      console.log(`[realtime/shopify_order] ✓ Stock ajustado: bsaleVariantId=${bsaleVariantId} delta=-${lineItem.quantity}`);
     } catch (err) {
-      console.error(
-        `[realtime] Bsale adjustment failed for variantId=${bsaleVariantId}:`,
-        err,
-      );
+      console.error(`[realtime/shopify_order] ✗ Error ajustando stock bsaleVariantId=${bsaleVariantId}:`, err);
     }
   }
 
   await markProcessed(shopId, "shopify", `order_${orderId}`);
+  console.log(`[realtime/shopify_order] ── fin orden=${orderId}`);
 }
 
 // ── Flujo 2: Bsale document:add → Shopify inventory adjustment ───────────────
@@ -228,6 +242,14 @@ export async function handleBsaleDocumentAdd(
 
   // Log once to confirm the real structure from Bsale
   console.log("[realtime] Bsale full document:", JSON.stringify(doc, null, 2));
+
+  // Skip documents created by SkuBeam itself (emit_boleta job uses salesId = "shopify_XXX")
+  // Processing these back would double-adjust Shopify stock already reduced by the sale
+  if (doc.salesId?.startsWith("shopify_")) {
+    console.log(`[realtime] Documento ${documentId} creado por SkuBeam (salesId=${doc.salesId}) — skip para evitar loop`);
+    await markProcessed(shopId, "bsale", `doc_${documentId}`);
+    return;
+  }
 
   const details = doc.details?.items ?? [];
 

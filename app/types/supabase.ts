@@ -309,6 +309,8 @@ export type Database = {
         Row: {
           active_addons: string[] | null
           bsale_default_office_id: number | null
+          bsale_document_code_sii: number | null
+          bsale_document_type_id: number | null
           bsale_last_sync: string | null
           bsale_office_id: number | null
           bsale_price_list_id: number | null
@@ -327,6 +329,8 @@ export type Database = {
         Insert: {
           active_addons?: string[] | null
           bsale_default_office_id?: number | null
+          bsale_document_code_sii?: number | null
+          bsale_document_type_id?: number | null
           bsale_last_sync?: string | null
           bsale_office_id?: number | null
           bsale_price_list_id?: number | null
@@ -345,6 +349,8 @@ export type Database = {
         Update: {
           active_addons?: string[] | null
           bsale_default_office_id?: number | null
+          bsale_document_code_sii?: number | null
+          bsale_document_type_id?: number | null
           bsale_last_sync?: string | null
           bsale_office_id?: number | null
           bsale_price_list_id?: number | null

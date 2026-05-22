@@ -67,12 +67,15 @@ export async function paginate<T>(
 
 /** POST request to Bsale — used for creating documents and other resources. */
 export async function post<T>(path: string, token: string, body: unknown): Promise<T> {
+  const url = `${BASE_URL}${path}`;
+  console.log(`[bsale-client] POST ${url}`, JSON.stringify(body));
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 25_000);
 
   let res: Response;
   try {
-    res = await fetch(`${BASE_URL}${path}`, {
+    res = await fetch(url, {
       method:  "POST",
       headers: headers(token),
       body:    JSON.stringify(body),
@@ -82,20 +85,26 @@ export async function post<T>(path: string, token: string, body: unknown): Promi
     clearTimeout(timer);
   }
 
+  const rawText = await res.text();
+  console.log(`[bsale-client] POST ${path} → HTTP ${res.status}`, rawText.slice(0, 500));
+
   if (!res.ok) {
-    throw new Error(`Bsale POST ${path}: ${res.status} ${res.statusText}`);
+    throw new Error(`Bsale POST ${path}: ${res.status} ${res.statusText} — ${rawText}`);
   }
-  return res.json() as Promise<T>;
+  return JSON.parse(rawText) as T;
 }
 
 /** PUT request to Bsale — used for stock adjustments. */
 export async function put<T>(path: string, token: string, body: unknown): Promise<T> {
+  const url = `${BASE_URL}${path}`;
+  console.log(`[bsale-client] PUT ${url}`, JSON.stringify(body));
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 25_000);
 
   let res: Response;
   try {
-    res = await fetch(`${BASE_URL}${path}`, {
+    res = await fetch(url, {
       method:  "PUT",
       headers: headers(token),
       body:    JSON.stringify(body),
@@ -105,10 +114,13 @@ export async function put<T>(path: string, token: string, body: unknown): Promis
     clearTimeout(timer);
   }
 
+  const rawText = await res.text();
+  console.log(`[bsale-client] PUT ${path} → HTTP ${res.status}`, rawText.slice(0, 500));
+
   if (!res.ok) {
-    throw new Error(`Bsale PUT ${path}: ${res.status} ${res.statusText}`);
+    throw new Error(`Bsale PUT ${path}: ${res.status} ${res.statusText} — ${rawText}`);
   }
-  return res.json() as Promise<T>;
+  return JSON.parse(rawText) as T;
 }
 
 interface BsaleWebhook {
@@ -117,35 +129,39 @@ interface BsaleWebhook {
   urlEndpoint: string;
 }
 
-/** Register a Bsale webhook for document:add, skipping sandbox accounts and duplicates. */
+/** Register a Bsale webhook for document:add, deduplicating against existing registrations. */
 export async function registerBsaleWebhook(
   accessToken: string,
   webhookUrl:  string,
 ): Promise<{ ok: boolean; skipped?: boolean; reason?: string; id?: number; error?: string }> {
+  const BASE = "https://api.bsale.io/v1/webhooks.json";
+
   try {
-    // Probe the webhooks endpoint first — sandbox returns 404, production returns 200/items
-    const check = await fetch("https://api.bsale.io/v1/webhooks.json", {
+    // Try to list existing webhooks — may fail on some plans (not sandbox-specific)
+    const checkRes = await fetch(BASE, {
       headers: { access_token: accessToken },
     });
 
-    if (check.status === 404) {
-      console.log("[bsale] webhooks endpoint not available (sandbox), skipping");
-      return { ok: true, skipped: true, reason: "sandbox-no-webhooks" };
-    }
+    console.log("[bsale] GET webhooks.json →", checkRes.status);
 
-    // Check for existing registration to avoid duplicates
-    if (check.ok) {
-      const existing = await check.json() as BsalePage<BsaleWebhook>;
+    if (checkRes.ok) {
+      const existing = await checkRes.json() as BsalePage<BsaleWebhook>;
       const alreadyExists = existing.items?.some(
         (w) => w.urlEndpoint === webhookUrl && w.topic === "document:add",
       );
       if (alreadyExists) {
-        console.log("[bsale] webhook already registered, skipping");
+        console.log("[bsale] webhook ya registrado — saltando");
         return { ok: true, skipped: true, reason: "duplicate" };
       }
+      console.log("[bsale] webhooks existentes:", existing.items?.length ?? 0);
+    } else {
+      // 404 or other — log but continue to attempt registration anyway
+      const errBody = await checkRes.text();
+      console.warn(`[bsale] GET webhooks.json falló (${checkRes.status}): ${errBody}. Intentando registro de todas formas.`);
     }
 
-    const res = await fetch("https://api.bsale.io/v1/webhooks.json", {
+    // Attempt registration
+    const postRes = await fetch(BASE, {
       method:  "POST",
       headers: {
         "Content-Type": "application/json",
@@ -154,16 +170,22 @@ export async function registerBsaleWebhook(
       body: JSON.stringify({ topic: "document:add", urlEndpoint: webhookUrl }),
     });
 
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Bsale register webhook: ${res.status} ${body}`);
+    const postBody = await postRes.text();
+    console.log(`[bsale] POST webhooks.json → ${postRes.status}:`, postBody.slice(0, 300));
+
+    if (!postRes.ok) {
+      // Some Bsale plans don't support API webhook registration — not a fatal error
+      // The merchant can register the webhook manually from the Bsale panel
+      console.warn("[bsale] Registro automático no disponible — registrar manualmente en Bsale → Configuración → Webhooks");
+      return { ok: false, error: `HTTP ${postRes.status}: ${postBody}` };
     }
 
-    const json = await res.json() as { id?: number };
-    console.log("[bsale] webhook registered", { id: json.id, url: webhookUrl });
+    const json = JSON.parse(postBody) as { id?: number };
+    console.log("[bsale] webhook registrado exitosamente", { id: json.id, url: webhookUrl });
     return { ok: true, id: json.id };
+
   } catch (err) {
-    console.error("[bsale] webhook registration error", err);
+    console.error("[bsale] webhook registration error:", err);
     return { ok: false, error: String(err) };
   }
 }
@@ -297,6 +319,38 @@ export async function getOffices(token: string): Promise<BsaleOfficeOption[]> {
       }));
   } catch (err) {
     console.warn("[bsale] getOffices failed:", String(err));
+    return [];
+  }
+}
+
+// ── Document type helpers ─────────────────────────────────────────────────────
+
+export interface BsaleDocumentTypeOption {
+  id:      number;
+  name:    string;
+  codeSii: number | null;
+}
+
+interface RawDocumentType {
+  id:       number;
+  name:     string;
+  codeSii?: number | null;
+  state:    number;
+}
+
+/** Return active document types (state=0) for the merchant — used in boleta setup. */
+export async function getDocumentTypes(token: string): Promise<BsaleDocumentTypeOption[]> {
+  try {
+    const data = await get<BsalePage<RawDocumentType>>("/document_types.json?state=0&limit=50", token);
+    return (data?.items ?? [])
+      .filter((dt) => dt.state === 0)
+      .map((dt) => ({
+        id:      dt.id,
+        name:    dt.name,
+        codeSii: dt.codeSii ?? null,
+      }));
+  } catch (err) {
+    console.warn("[bsale] getDocumentTypes failed:", String(err));
     return [];
   }
 }

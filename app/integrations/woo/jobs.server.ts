@@ -1048,7 +1048,7 @@ async function createShopifyOrder(
   // Step 3 — Create the order in Shopify. Rollback the claim if it fails.
   try {
     const res = await fetchWithRetry(
-      `https://${ctx.shopId}/admin/api/2025-10/orders.json?send_receipt=false&send_fulfillment_receipt=false`,
+      `https://${ctx.shopId}/admin/api/2025-10/orders.json`,
       {
         method:  "POST",
         headers: {
@@ -1057,12 +1057,14 @@ async function createShopifyOrder(
         },
         body: JSON.stringify({
           order: {
-            email:              order.billing?.email || "",
-            created_at:         order.date_created,
-            financial_status:   "paid",
-            fulfillment_status: order.status === "completed" ? "fulfilled" : null,
-            source_name: "WooCommerce",
-            tags:        "migrado-woocommerce",
+            email:                     order.billing?.email || "",
+            created_at:                order.date_created,
+            financial_status:          "paid",
+            fulfillment_status:        order.status === "completed" ? "fulfilled" : null,
+            send_receipt:              false,
+            send_fulfillment_receipt:  false,
+            source_name:               "WooCommerce",
+            tags:                      "migrado-woocommerce",
             note:               `Migrado desde WooCommerce. ID original: ${order.id}. Método de pago: ${order.payment_method_title || "N/A"}`,
             note_attributes: [
               { name: "woo_order_id",          value: String(order.id) },

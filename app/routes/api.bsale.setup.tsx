@@ -13,11 +13,18 @@ import { supabaseAdmin } from "../db.server";
 export async function action({ request }: ActionFunctionArgs) {
   const { session } = await authenticate.admin(request);
 
-  const body = await request.json() as { priceListId?: number; officeId?: number };
+  const body = await request.json() as {
+    priceListId?:    number;
+    officeId?:       number;
+    documentTypeId?: number | null;
+    codeSii?:        number | null;
+  };
 
-  const update: Record<string, number> = {};
-  if (body.priceListId != null) update.bsale_price_list_id = body.priceListId;
-  if (body.officeId   != null) update.bsale_office_id      = body.officeId;
+  const update: Record<string, number | null> = {};
+  if (body.priceListId    != null) update.bsale_price_list_id     = body.priceListId;
+  if (body.officeId       != null) update.bsale_office_id          = body.officeId;
+  if ("documentTypeId" in body)    update.bsale_document_type_id   = body.documentTypeId ?? null;
+  if ("codeSii"        in body)    update.bsale_document_code_sii  = body.codeSii ?? null;
 
   if (Object.keys(update).length > 0) {
     await supabaseAdmin

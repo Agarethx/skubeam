@@ -21,14 +21,15 @@ const RATE_LIMIT_MS = 500; // ms between jobs to avoid Bsale rate limits
  * (e.g. Railway cron, Fly.io scheduled machine) for reliability.
  */
 export async function action({ request }: ActionFunctionArgs) {
-  // Auth check — shared secret
+  console.log("[worker] ── INVOCADO ────────────────────────────────────────────");
+
   const authHeader = request.headers.get("x-worker-secret");
   if (authHeader !== process.env.WORKER_SECRET) {
+    console.warn("[worker] Unauthorized — secret inválido o ausente");
     return new Response("Unauthorized", { status: 401 });
   }
 
-  // Fetch pending jobs oldest-first
-  const { data: jobs } = await supabaseAdmin
+  const { data: jobs, error: fetchErr } = await supabaseAdmin
     .from("sync_jobs")
     .select("*")
     .eq("status", "pending")
@@ -36,7 +37,17 @@ export async function action({ request }: ActionFunctionArgs) {
     .order("created_at", { ascending: true })
     .limit(BATCH_SIZE);
 
+  if (fetchErr) {
+    console.error("[worker] Error leyendo sync_jobs:", fetchErr.message);
+    return data({ processed: 0, errors: 0 });
+  }
+
+  console.log(`[worker] Jobs pendientes encontrados: ${jobs?.length ?? 0}`, {
+    tipos: jobs?.map((j) => j.type) ?? [],
+  });
+
   if (!jobs?.length) {
+    console.log("[worker] Sin jobs pendientes — saliendo");
     return data({ processed: 0, errors: 0 });
   }
 
@@ -44,7 +55,8 @@ export async function action({ request }: ActionFunctionArgs) {
   let errors    = 0;
 
   for (const job of jobs) {
-    // Optimistic lock — claim the job only if it is still pending
+    console.log(`[worker] Intentando reclamar job ${job.id} (${job.type}) shop=${job.shop_id}`);
+
     const { data: claimed } = await supabaseAdmin
       .from("sync_jobs")
       .update({ status: "processing", started_at: new Date().toISOString() })
@@ -53,7 +65,12 @@ export async function action({ request }: ActionFunctionArgs) {
       .select("id")
       .maybeSingle();
 
-    if (!claimed) continue; // another worker instance claimed it first
+    if (!claimed) {
+      console.log(`[worker] Job ${job.id} ya reclamado por otra instancia — saltando`);
+      continue;
+    }
+
+    console.log(`[worker] ── Procesando job ${job.id} tipo="${job.type}" ──`);
 
     try {
       await processJob(job.id, job.shop_id, job.type, job.payload as Record<string, unknown> ?? {});
@@ -63,10 +80,11 @@ export async function action({ request }: ActionFunctionArgs) {
         .update({ status: "completed", completed_at: new Date().toISOString() })
         .eq("id", job.id);
 
+      console.log(`[worker] Job ${job.id} (${job.type}) completado OK`);
       processed++;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`[worker] Error procesando job ${job.id} (${job.type}):`, message);
+      console.error(`[worker] Job ${job.id} (${job.type}) FALLÓ:`, message);
 
       await supabaseAdmin
         .from("sync_jobs")
@@ -80,13 +98,12 @@ export async function action({ request }: ActionFunctionArgs) {
       errors++;
     }
 
-    // Rate limiting between jobs
     if (processed + errors < jobs.length) {
       await new Promise<void>((resolve) => setTimeout(resolve, RATE_LIMIT_MS));
     }
   }
 
-  console.log(`[worker] Procesados: ${processed}, Errores: ${errors}`);
+  console.log(`[worker] ── FIN: procesados=${processed} errores=${errors} ──`);
   return data({ processed, errors });
 }
 
@@ -101,31 +118,59 @@ async function processJob(
   if (type === "bsale_document") {
     const resourceId = payload.resourceId as string;
     if (!resourceId) throw new Error("bsale_document job missing resourceId in payload");
+    console.log(`[worker/bsale_document] Procesando documento Bsale id=${resourceId}`);
     await handleBsaleDocumentAdd(shopId, resourceId);
 
   } else if (type === "shopify_order") {
     const order = payload.order as ShopifyOrderPayload;
     if (!order) throw new Error("shopify_order job missing order in payload");
+    console.log(`[worker/shopify_order] Ajustando stock Bsale para orden Shopify id=${order.id}`, {
+      lineItems: order.line_items?.length ?? 0,
+    });
     await handleShopifyOrderPaid(shopId, order);
+    console.log(`[worker/shopify_order] Ajuste stock completado para orden ${order.id}`);
 
   } else if (type === "emit_boleta") {
     const order    = payload.order as ShopifyOrderForBoleta;
     const officeId = (payload.officeId as number | undefined) ?? 1;
     if (!order) throw new Error("emit_boleta job missing order in payload");
 
+    console.log(`[worker/emit_boleta] Emitiendo boleta para orden Shopify id=${order.id}`, {
+      officeId,
+      email:      order.email ?? "(sin email)",
+      totalPrice: order.total_price,
+      lineItems:  order.line_items?.length ?? 0,
+    });
+
     const { data: shopRow } = await supabaseAdmin
       .from("shops")
-      .select("bsale_token")
+      .select("bsale_token, bsale_document_type_id, bsale_document_code_sii")
       .eq("shop_id", shopId)
       .maybeSingle();
 
+    const documentTypeId = shopRow?.bsale_document_type_id ?? null;
+    const codeSii        = shopRow?.bsale_document_code_sii ?? null;
+
+    console.log(`[worker/emit_boleta] Token Bsale`, {
+      found: !!shopRow?.bsale_token,
+      documentTypeId,
+      codeSii,
+    });
+
     if (!shopRow?.bsale_token) {
-      console.log(`[worker] emit_boleta: shop ${shopId} has no Bsale token — skip`);
+      console.warn(`[worker/emit_boleta] Shop ${shopId} sin token Bsale — saltando`);
+      return;
+    }
+
+    if (!documentTypeId && !codeSii) {
+      console.warn(`[worker/emit_boleta] Shop ${shopId} sin tipo de documento configurado — configura en Integraciones → Bsale → Tipo de documento`);
       return;
     }
 
     const token = resolveToken(shopRow.bsale_token);
-    await emitBoleta(shopId, token, officeId, order);
+    console.log(`[worker/emit_boleta] Llamando emitBoleta...`);
+    await emitBoleta(shopId, token, officeId, order, documentTypeId, codeSii ?? undefined);
+    console.log(`[worker/emit_boleta] Documento creado para orden ${order.id}`);
 
   } else if (type === "shopify_sales_history") {
     await importShopifySalesHistory(shopId);

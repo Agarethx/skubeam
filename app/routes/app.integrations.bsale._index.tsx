@@ -3,7 +3,7 @@ import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useEffect, useRef, useState } from "react";
 import { useSkuBeamNavigate } from "../lib/navigate";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import { authenticate } from "../shopify.server";
+import { authenticate, registerWebhooks } from "../shopify.server";
 import { supabaseAdmin } from "../db.server";
 import {
   createBsaleJob,
@@ -13,8 +13,10 @@ import {
   registerBsaleWebhook,
   getPriceLists,
   getOffices,
+  getDocumentTypes,
   type BsalePriceListOption,
   type BsaleOfficeOption,
+  type BsaleDocumentTypeOption,
 } from "../integrations/bsale/client.server";
 
 // ── Loader ────────────────────────────────────────────────────────────────────
@@ -26,7 +28,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const [shopRow, activeJob, recentBoletas] = await Promise.all([
     supabaseAdmin
       .from("shops")
-      .select("bsale_token, bsale_last_sync, active_addons, bsale_price_list_id, bsale_office_id")
+      .select("bsale_token, bsale_last_sync, active_addons, bsale_price_list_id, bsale_office_id, bsale_document_type_id, bsale_document_code_sii")
       .eq("shop_id", shopId)
       .single()
       .then(({ data }) => data),
@@ -40,19 +42,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .then(({ data }) => data ?? []),
   ]);
 
-  const hasToken    = !!shopRow?.bsale_token;
+  const hasToken     = !!shopRow?.bsale_token;
   const hasPriceList = !!shopRow?.bsale_price_list_id;
   const hasOffice    = !!shopRow?.bsale_office_id;
   const hasAddon     = shopRow?.active_addons?.includes("bsale_documents") ?? false;
 
   // Always load price lists + offices when the token exists
   // (needed both for wizard and for "Cambiar configuración" flow)
-  const [priceLists, offices]: [BsalePriceListOption[], BsaleOfficeOption[]] = hasToken
+  const [priceLists, offices, documentTypes]: [BsalePriceListOption[], BsaleOfficeOption[], BsaleDocumentTypeOption[]] = hasToken
     ? await Promise.all([
         getPriceLists(shopRow!.bsale_token!),
         getOffices(shopRow!.bsale_token!),
+        getDocumentTypes(shopRow!.bsale_token!),
       ])
-    : [[], []];
+    : [[], [], []];
 
   const isFullyConfigured = hasToken && hasPriceList && hasOffice;
 
@@ -61,14 +64,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     hasPriceList,
     hasOffice,
     isFullyConfigured,
-    priceListId:   shopRow?.bsale_price_list_id ?? null,
-    officeId:      shopRow?.bsale_office_id ?? null,
-    bsaleLastSync: shopRow?.bsale_last_sync ?? null,
+    priceListId:    shopRow?.bsale_price_list_id ?? null,
+    officeId:       shopRow?.bsale_office_id ?? null,
+    documentTypeId: shopRow?.bsale_document_type_id ?? null,
+    documentCodeSii: shopRow?.bsale_document_code_sii ?? null,
+    bsaleLastSync:  shopRow?.bsale_last_sync ?? null,
     activeJob,
     hasAddon,
     recentBoletas,
     priceLists,
     offices,
+    documentTypes,
   };
 };
 
@@ -98,14 +104,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (appUrl) {
       const webhookUrl = `${appUrl}/webhooks/bsale/document?shop=${shopId}`;
       const reg = await registerBsaleWebhook(token, webhookUrl);
-      if (reg.skipped && reg.reason === "sandbox-no-webhooks") {
-        return { success: "Token guardado. Cuenta sandbox — webhook no registrado.", tokenSaved: true };
-      }
       if (reg.skipped) {
-        return { success: "Token guardado. Webhook ya estaba registrado.", tokenSaved: true };
+        return { success: "Token guardado. Webhook Bsale ya estaba registrado.", tokenSaved: true };
       }
       if (!reg.ok) {
-        return { success: "Token guardado. Webhook pendiente de registro manual.", tokenSaved: true };
+        const manualUrl = `${appUrl}/webhooks/bsale/document?shop=${shopId}`;
+        return { success: `Token guardado. Registro automático no disponible — registra manualmente en Bsale → Configuración → Webhooks: ${manualUrl}`, tokenSaved: true };
       }
       return { success: `Token guardado y webhook registrado (id: ${reg.id}).`, tokenSaved: true };
     }
@@ -117,15 +121,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       .from("shops").select("bsale_token").eq("shop_id", shopId).single();
     const token = shop?.bsale_token;
     if (!token) return { error: "Configura el access token antes de registrar el webhook." };
-    const appUrl = process.env.APP_URL ?? "";
+    const appUrl = process.env.APP_URL ?? process.env.SHOPIFY_APP_URL ?? "";
     if (!appUrl) return { error: "APP_URL no está configurado en el entorno." };
     const webhookUrl = `${appUrl}/webhooks/bsale/document?shop=${shopId}`;
     const reg = await registerBsaleWebhook(token, webhookUrl);
-    if (!reg.ok) return { error: `Error registrando webhook: ${reg.error}` };
-    if (reg.skipped) return { success: reg.reason === "sandbox-no-webhooks"
-      ? "Cuenta sandbox — webhooks no disponibles."
-      : "El webhook ya estaba registrado." };
+    if (!reg.ok) return { error: `Registro automático no disponible en este plan de Bsale. Regístralo manualmente en Bsale → Configuración → Webhooks apuntando a: ${webhookUrl}` };
+    if (reg.skipped) return { success: "El webhook ya estaba registrado." };
     return { success: `Webhook registrado (id: ${reg.id}). URL: ${webhookUrl}` };
+  }
+
+  if (intent === "reregister_shopify_webhooks") {
+    try {
+      const { session } = await authenticate.admin(request);
+      console.log("[bsale-ui] Re-registrando webhooks Shopify para session:", session.shop);
+      await registerWebhooks({ session });
+      console.log("[bsale-ui] Webhooks Shopify re-registrados OK");
+      const appUrl = process.env.SHOPIFY_APP_URL ?? process.env.APP_URL ?? "(desconocida)";
+      return { success: `Webhooks Shopify re-registrados. URL activa: ${appUrl}` };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[bsale-ui] Error re-registrando webhooks:", msg);
+      return { error: `Error re-registrando webhooks: ${msg}` };
+    }
   }
 
   const { data: shop } = await supabaseAdmin
@@ -144,6 +161,42 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const job = await createBsaleJob(shopId, "bsale_stock");
     console.log("[stock-sync] job created:", job.id);
     return { jobId: job.id, jobType: "bsale_stock" as const };
+  }
+
+  if (intent === "toggle_addon") {
+    const { data: currentShop } = await supabaseAdmin
+      .from("shops")
+      .select("active_addons")
+      .eq("shop_id", shopId)
+      .single();
+
+    const current = currentShop?.active_addons ?? [];
+    const hasIt   = current.includes("bsale_documents");
+    const updated = hasIt
+      ? current.filter((a: string) => a !== "bsale_documents")
+      : [...current, "bsale_documents"];
+
+    await supabaseAdmin
+      .from("shops")
+      .update({ active_addons: updated })
+      .eq("shop_id", shopId);
+
+    return { success: hasIt ? "Nota de Venta automática desactivada." : "Nota de Venta automática activada." };
+  }
+
+  if (intent === "save_document_type") {
+    const documentTypeId = formData.get("documentTypeId");
+    const codeSii        = formData.get("codeSii");
+
+    await supabaseAdmin
+      .from("shops")
+      .update({
+        bsale_document_type_id:  documentTypeId ? Number(documentTypeId) : null,
+        bsale_document_code_sii: codeSii ? Number(codeSii) : null,
+      })
+      .eq("shop_id", shopId);
+
+    return { success: "Tipo de documento guardado." };
   }
 
   return { error: "Acción desconocida." };
@@ -234,9 +287,9 @@ function WizardHeader({ step, onReset }: { step: 1 | 2 | 3 | 4; onReset?: () => 
 export default function BsaleIntegrationPage() {
   const {
     hasToken, hasPriceList, hasOffice, isFullyConfigured,
-    priceListId, officeId,
+    priceListId, officeId, documentTypeId, documentCodeSii,
     bsaleLastSync, activeJob, hasAddon, recentBoletas,
-    priceLists, offices,
+    priceLists, offices, documentTypes,
   } = useLoaderData<typeof loader>();
 
   const revalidator = useRevalidator();
@@ -247,9 +300,10 @@ export default function BsaleIntegrationPage() {
   const [showWizard, setShowWizard] = useState(!isFullyConfigured);
   const [step, setStep]             = useState<1 | 2 | 3 | 4>(initialStep);
 
-  // Local selections for steps 2 + 3
-  const [selectedPriceListId, setSelectedPriceListId] = useState<number | "">(priceListId ?? "");
-  const [selectedOfficeId,    setSelectedOfficeId]    = useState<number | "">(officeId ?? "");
+  // Local selections for steps 2 + 3 and document type
+  const [selectedPriceListId,  setSelectedPriceListId]  = useState<number | "">(priceListId ?? "");
+  const [selectedOfficeId,     setSelectedOfficeId]     = useState<number | "">(officeId ?? "");
+  const [selectedDocTypeId,    setSelectedDocTypeId]    = useState<number | "">(documentTypeId ?? "");
 
   // Fetchers
   const tokenFetcher   = useFetcher<{ success?: string; error?: string; tokenSaved?: boolean }>();
@@ -323,7 +377,7 @@ export default function BsaleIntegrationPage() {
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
-  function saveSetup(payload: { priceListId?: number; officeId?: number }) {
+  function saveSetup(payload: { priceListId?: number; officeId?: number; documentTypeId?: number | null; codeSii?: number | null }) {
     setupFetcher.submit(JSON.stringify(payload), {
       method:   "POST",
       action:   "/api/bsale/setup",
@@ -641,7 +695,17 @@ export default function BsaleIntegrationPage() {
                       variant="tertiary"
                       {...(webhookFetcher.state !== "idle" ? { loading: true } : {})}
                     >
-                      Re-registrar webhook
+                      Re-registrar webhook Bsale
+                    </s-button>
+                  </webhookFetcher.Form>
+                  <webhookFetcher.Form method="post">
+                    <input type="hidden" name="intent" value="reregister_shopify_webhooks" />
+                    <s-button
+                      type="submit"
+                      variant="tertiary"
+                      {...(webhookFetcher.state !== "idle" ? { loading: true } : {})}
+                    >
+                      Re-registrar webhooks Shopify
                     </s-button>
                   </webhookFetcher.Form>
                 </s-stack>
@@ -711,12 +775,88 @@ export default function BsaleIntegrationPage() {
           </s-section>
 
           {/* Boleta electrónica */}
-          <s-section heading="Boleta electrónica automática">
+          <s-section heading="Nota de Venta automática">
             {hasAddon ? (
               <s-stack direction="block" gap="base">
-                <s-banner tone="success" heading="Add-on activo — se emite una boleta por cada venta en Shopify." />
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <s-banner tone="success" heading="Add-on activo — se crea una Nota de Venta en Bsale por cada venta en Shopify. El admin la aprueba en Bsale para generar el documento final." />
+                  <webhookFetcher.Form method="post">
+                    <input type="hidden" name="intent" value="toggle_addon" />
+                    <s-button
+                      type="submit"
+                      variant="tertiary"
+                      tone="critical"
+                      {...(webhookFetcher.state !== "idle" ? { loading: true } : {})}
+                    >
+                      Desactivar
+                    </s-button>
+                  </webhookFetcher.Form>
+                </div>
+
+                {/* Document type selector */}
+                <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+                  <s-stack direction="block" gap="small">
+                    <p style={HEADING_STYLE}>Tipo de documento Bsale</p>
+                    {documentTypeId == null && (
+                      <s-banner tone="warning" heading="Selecciona el tipo de documento para emitir Notas de Venta automáticas." />
+                    )}
+                    {documentTypes.length === 0 ? (
+                      <s-text color="subdued">No se encontraron tipos de documento activos en Bsale.</s-text>
+                    ) : (
+                      <webhookFetcher.Form method="post" style={{ display: "contents" }}>
+                        <input type="hidden" name="intent" value="save_document_type" />
+                        <s-stack direction="block" gap="small">
+                          <label style={{ display: "block" }}>
+                            <span style={LABEL_STYLE}>Tipo de documento</span>
+                            <select
+                              name="documentTypeId"
+                              defaultValue={documentTypeId ?? ""}
+                              style={SELECT_STYLE}
+                              onChange={(e) => {
+                                const val = e.target.value ? Number(e.target.value) : "";
+                                setSelectedDocTypeId(val);
+                              }}
+                            >
+                              <option value="">Seleccionar tipo…</option>
+                              {documentTypes.map((dt) => (
+                                <option key={dt.id} value={dt.id}>
+                                  {dt.name}{dt.codeSii ? ` (SII: ${dt.codeSii})` : " (sin SII — Nota de Venta)"}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          {/* Hidden codeSii — populated from selected option */}
+                          <input
+                            type="hidden"
+                            name="codeSii"
+                            value={
+                              selectedDocTypeId
+                                ? (documentTypes.find((dt) => dt.id === selectedDocTypeId)?.codeSii ?? "")
+                                : (documentCodeSii ?? "")
+                            }
+                          />
+                          <s-button
+                            type="submit"
+                            variant="primary"
+                            {...(webhookFetcher.state !== "idle" ? { loading: true } : {})}
+                          >
+                            Guardar tipo de documento
+                          </s-button>
+                        </s-stack>
+                      </webhookFetcher.Form>
+                    )}
+                    {documentTypeId != null && (
+                      <s-text color="subdued">
+                        Configurado: <strong>{documentTypes.find((dt) => dt.id === documentTypeId)?.name ?? `ID ${documentTypeId}`}</strong>
+                        {documentCodeSii
+                          ? ` — declarado al SII (codeSii ${documentCodeSii})`
+                          : " — Nota de Venta (borrador interno, no va al SII)"}
+                      </s-text>
+                    )}
+                  </s-stack>
+                </s-box>
                 {recentBoletas.length === 0 ? (
-                  <s-text color="subdued">Aún no hay boletas emitidas.</s-text>
+                  <s-text color="subdued">Aún no hay Notas de Venta emitidas.</s-text>
                 ) : (
                   <div
                     style={{
@@ -799,10 +939,23 @@ export default function BsaleIntegrationPage() {
               <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
                 <s-stack direction="block" gap="base">
                   <s-text color="subdued">
-                    Emite una boleta electrónica en Bsale automáticamente por cada venta en Shopify.
-                    El documento se envía al SII y al cliente por email.
+                    Crea una Nota de Venta en Bsale automáticamente por cada venta en Shopify.
+                    El admin la revisa en el dashboard de Bsale y la aprueba para generar el documento fiscal final.
                   </s-text>
-                  <s-banner tone="info" heading="Add-on de pago — contacta a soporte para activarlo en tu cuenta." />
+                  <webhookFetcher.Form method="post">
+                    <input type="hidden" name="intent" value="toggle_addon" />
+                    <s-button
+                      type="submit"
+                      variant="primary"
+                      {...(!hasToken ? { disabled: true } : {})}
+                      {...(webhookFetcher.state !== "idle" ? { loading: true } : {})}
+                    >
+                      Activar Nota de Venta automática
+                    </s-button>
+                  </webhookFetcher.Form>
+                  {!hasToken && (
+                    <s-text color="subdued">Configura el token de Bsale antes de activar.</s-text>
+                  )}
                 </s-stack>
               </s-box>
             )}
