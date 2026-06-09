@@ -251,7 +251,9 @@ export async function upsertSkuFromShopify(
   }
 
   if (toInsert.length > 0) {
-    const { error } = await supabaseAdmin.from("skus").insert(toInsert);
+    const { error } = await supabaseAdmin
+      .from("skus")
+      .upsert(toInsert, { onConflict: "shopify_variant_id", ignoreDuplicates: true });
     if (error) console.error("[upsertSkuFromShopify] insert:", error.message);
   }
 
