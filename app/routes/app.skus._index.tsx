@@ -159,19 +159,17 @@ function SyncProgressBanner({ job }: { job: SyncJob }) {
             }} />
           </div>
         )}
-        {isBulk && (
-          <cancelFetcher.Form method="post" action="/api/cancel-job">
-            <input type="hidden" name="jobId" value={polledJob.id ?? ""} />
-            <s-button
-              type="submit"
-              tone="critical"
-              variant="secondary"
-              {...(isCancelling ? { loading: true } : {})}
-            >
-              Cancelar publicación
-            </s-button>
-          </cancelFetcher.Form>
-        )}
+        <cancelFetcher.Form method="post" action="/api/cancel-job">
+          <input type="hidden" name="jobId" value={polledJob.id ?? ""} />
+          <s-button
+            type="submit"
+            tone="critical"
+            variant="secondary"
+            {...(isCancelling ? { loading: true } : {})}
+          >
+            {isBulk ? "Cancelar publicación" : "Cancelar sincronización"}
+          </s-button>
+        </cancelFetcher.Form>
       </s-stack>
     </s-banner>
   );

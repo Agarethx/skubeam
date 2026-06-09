@@ -22,7 +22,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     .update({ status: "cancelled", completed_at: new Date().toISOString() })
     .eq("id", jobId)
     .eq("shop_id", shopId)
-    .in("status", ["pending", "processing"]);
+    .in("status", ["pending", "processing", "running"]);
 
   if (error) return data({ ok: false, error: error.message }, { status: 500 });
 

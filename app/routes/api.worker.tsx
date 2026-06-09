@@ -104,6 +104,22 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   console.log(`[worker] ── FIN: procesados=${processed} errores=${errors} ──`);
+
+  // Self-chain: if we processed a full batch there may be more jobs waiting.
+  // Fire another invocation asynchronously so the queue drains without needing
+  // an external event to re-trigger the worker.
+  if (processed + errors === BATCH_SIZE) {
+    const appUrl       = process.env.APP_URL ?? process.env.SHOPIFY_APP_URL;
+    const workerSecret = process.env.WORKER_SECRET;
+    if (appUrl && workerSecret) {
+      console.log("[worker] Batch completo — encadenando siguiente invocación");
+      fetch(`${appUrl}/api/worker`, {
+        method:  "POST",
+        headers: { "x-worker-secret": workerSecret },
+      }).catch((err) => console.error("[worker] Error encadenando worker:", err));
+    }
+  }
+
   return data({ processed, errors });
 }
 
