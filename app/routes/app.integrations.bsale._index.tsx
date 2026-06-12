@@ -380,13 +380,13 @@ function StockDetailTable({
               : "var(--p-color-text-subdued, #6d7175)";
 
             return [
-              <span style={{ fontFamily: "monospace", fontWeight: 600 }}>{item.sku_code}</span>,
-              <span style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>{item.title ?? "—"}</span>,
-              <span style={{ textAlign: "right" as const, display: "block" }}>{item.qty_before.toLocaleString("es-CL")}</span>,
-              <span style={{ textAlign: "right" as const, display: "block", fontWeight: item.changed ? 600 : 400 }}>
+              <span key="sku"    style={{ fontFamily: "monospace", fontWeight: 600 }}>{item.sku_code}</span>,
+              <span key="title"  style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>{item.title ?? "—"}</span>,
+              <span key="before" style={{ textAlign: "right" as const, display: "block" }}>{item.qty_before.toLocaleString("es-CL")}</span>,
+              <span key="after"  style={{ textAlign: "right" as const, display: "block", fontWeight: item.changed ? 600 : 400 }}>
                 {item.qty_after.toLocaleString("es-CL")}
               </span>,
-              <span style={{ color: diffColor, fontWeight: 600, textAlign: "right" as const, display: "block" }}>
+              <span key="diff"   style={{ color: diffColor, fontWeight: 600, textAlign: "right" as const, display: "block" }}>
                 {diff === 0 ? "—" : diffStr}
               </span>,
             ];
@@ -963,9 +963,9 @@ export default function BsaleIntegrationPage() {
                     <SimpleTable
                       cols={["SKU", "Título", "Error"]}
                       rows={lastStockSync.error_details.map((d) => [
-                        <span style={{ fontFamily: "monospace", fontWeight: 600 }}>{d.sku_code}</span>,
+                        <span key="sku"   style={{ fontFamily: "monospace", fontWeight: 600 }}>{d.sku_code}</span>,
                         d.title ?? "—",
-                        <span style={{ color: "var(--p-color-text-critical, #d72c0d)", fontSize: "var(--p-font-size-300, 0.75rem)" }}>{d.error}</span>,
+                        <span key="error" style={{ color: "var(--p-color-text-critical, #d72c0d)", fontSize: "var(--p-font-size-300, 0.75rem)" }}>{d.error}</span>,
                       ])}
                     />
                   </s-stack>
