@@ -152,11 +152,13 @@ export async function syncBsaleStockToSkuBeam(
   };
 
   // 1. All Shopify-published SKUs (include shopify_variant_id for Shopify push)
+  // Supabase default cap is 1000 rows — override to cover up to 10k SKUs
   const { data: skuRows, error: skuErr } = await supabaseAdmin
     .from("skus")
     .select("id, sku_code, title, bsale_variant_id, shopify_variant_id")
     .eq("shop_id", shopId)
-    .not("shopify_variant_id", "is", null);
+    .not("shopify_variant_id", "is", null)
+    .limit(10000);
 
   if (skuErr) throw new Error(`[syncBsaleStockToSkuBeam] lookup: ${skuErr.message}`);
 
@@ -309,28 +311,17 @@ export async function syncBsaleStockToSkuBeam(
 
     if (variantGids.length === 0) throw new Error("No Shopify variant IDs available");
 
-    // Fetch inventory items + first active location in parallel
-    const [inventoryRes, locRes] = await Promise.all([
-      admin.graphql(
-        `#graphql
-        query GetVariantInventoryItems($ids: [ID!]!) {
-          nodes(ids: $ids) {
-            ... on ProductVariant { id inventoryItem { id } }
-          }
-        }`,
-        { variables: { ids: variantGids } },
-      ),
-      admin.graphql(`#graphql
-        query GetFirstLocation {
-          locations(first: 1, includeLegacy: false) {
-            edges { node { id } }
-          }
-        }`),
-    ]);
+    // Shopify nodes query limit is 250 IDs per call — batch accordingly
+    const NODES_BATCH = 250;
 
-    const inventoryJson = await inventoryRes.json() as {
-      data?: { nodes?: Array<{ id: string; inventoryItem?: { id: string } } | null> };
-    };
+    // Fetch location + inventory items in parallel (items batched)
+    const locRes = await admin.graphql(`#graphql
+      query GetFirstLocation {
+        locations(first: 1, includeLegacy: false) {
+          edges { node { id } }
+        }
+      }`);
+
     const locJson = await locRes.json() as {
       data?: { locations?: { edges: Array<{ node: { id: string } }> } };
     };
@@ -338,39 +329,64 @@ export async function syncBsaleStockToSkuBeam(
     const locationGid = locJson.data?.locations?.edges[0]?.node.id;
     if (!locationGid) throw new Error("[stock-sync] No active Shopify location found");
 
-    // shopifyVariantId → inventoryItemId GID
+    // shopifyVariantId → inventoryItemId GID (batch in 250s)
     const itemMap = new Map<number, string>();
-    for (const node of inventoryJson.data?.nodes ?? []) {
-      if (!node?.inventoryItem?.id) continue;
-      const varId = parseInt(node.id.split("/").pop()!, 10);
-      itemMap.set(varId, node.inventoryItem.id);
+    for (let i = 0; i < variantGids.length; i += NODES_BATCH) {
+      const batch = variantGids.slice(i, i + NODES_BATCH);
+      const res = await admin.graphql(
+        `#graphql
+        query GetVariantInventoryItems($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on ProductVariant { id inventoryItem { id } }
+          }
+        }`,
+        { variables: { ids: batch } },
+      );
+      const json = await res.json() as {
+        data?: { nodes?: Array<{ id: string; inventoryItem?: { id: string } } | null> };
+      };
+      for (const node of json.data?.nodes ?? []) {
+        if (!node?.inventoryItem?.id) continue;
+        const varId = parseInt(node.id.split("/").pop()!, 10);
+        itemMap.set(varId, node.inventoryItem.id);
+      }
     }
 
-    // Query current Shopify quantities for beforeMap
+    console.log(`[stock-sync] resolved inventoryItemId for ${itemMap.size} variants`);
+
+    // Query current Shopify quantities for beforeMap (batch in 250s)
     const inventoryItemGids = [...new Set(itemMap.values())];
-    const qtyRes = await admin.graphql(
-      `#graphql
-      query GetInventoryQuantities($ids: [ID!]!, $locId: ID!) {
-        nodes(ids: $ids) {
-          ... on InventoryItem {
-            id
-            inventoryLevel(locationId: $locId) {
-              quantities(names: ["available"]) { name quantity }
+    const allQtyNodes: Array<{
+      id: string;
+      inventoryLevel?: { quantities: Array<{ name: string; quantity: number }> };
+    } | null> = [];
+
+    for (let i = 0; i < inventoryItemGids.length; i += NODES_BATCH) {
+      const batch = inventoryItemGids.slice(i, i + NODES_BATCH);
+      const qtyRes = await admin.graphql(
+        `#graphql
+        query GetInventoryQuantities($ids: [ID!]!, $locId: ID!) {
+          nodes(ids: $ids) {
+            ... on InventoryItem {
+              id
+              inventoryLevel(locationId: $locId) {
+                quantities(names: ["available"]) { name quantity }
+              }
             }
           }
-        }
-      }`,
-      { variables: { ids: inventoryItemGids, locId: locationGid } },
-    );
-
-    const qtyJson = await qtyRes.json() as {
-      data?: {
-        nodes?: Array<{
-          id: string;
-          inventoryLevel?: { quantities: Array<{ name: string; quantity: number }> };
-        } | null>;
+        }`,
+        { variables: { ids: batch, locId: locationGid } },
+      );
+      const qtyJson = await qtyRes.json() as {
+        data?: {
+          nodes?: Array<{
+            id: string;
+            inventoryLevel?: { quantities: Array<{ name: string; quantity: number }> };
+          } | null>;
+        };
       };
-    };
+      allQtyNodes.push(...(qtyJson.data?.nodes ?? []));
+    }
 
     // inventoryItemGid → skuId
     const itemToSku = new Map<string, string>();
@@ -379,7 +395,7 @@ export async function syncBsaleStockToSkuBeam(
       if (entry) itemToSku.set(itemGid, entry.skuId);
     }
 
-    for (const node of qtyJson.data?.nodes ?? []) {
+    for (const node of allQtyNodes) {
       if (!node) continue;
       const skuId = itemToSku.get(node.id);
       if (!skuId) continue;
