@@ -6,17 +6,10 @@ import type { BsalePage } from "./client.server";
 
 // ── Bsale types ───────────────────────────────────────────────────────────────
 
-interface BsaleStock {
-  id:        number;
-  quantity:  number;
-  officeId:  number | null;
-  variantId: number;
-  office?:   { id: number; name?: string };
-}
-
-interface BsaleVariant {
-  id:   number;
-  code: string;
+interface BsaleStockRecord {
+  quantity: number;
+  variant?: { id: string; code?: string };
+  office?:  { id: number; name?: string };
 }
 
 // ── Result types ──────────────────────────────────────────────────────────────
@@ -48,7 +41,6 @@ export interface StockSyncResult {
 }
 
 // ── Shopify GraphQL client (offline session) ──────────────────────────────────
-// Mirrors getShopifyGraphQLClient in realtime.server.ts — needed outside request context
 
 async function getShopifyGraphQLClient(shopDomain: string) {
   const { data } = await supabaseAdmin
@@ -79,63 +71,89 @@ async function getShopifyGraphQLClient(shopDomain: string) {
   };
 }
 
-// ── Per-variant stock fetch ───────────────────────────────────────────────────
+// ── Bulk stock fetch from Bsale ───────────────────────────────────────────────
+// One paginated pass for the whole office catalog instead of N per-variant calls.
+// Parallel pages (5 concurrent) so 3,500 SKUs → ~70 pages → ~7s instead of ~20min.
 
-async function fetchStockForVariant(
-  variantId:  string,
-  token:      string,
-  officeId:   number | null,
-  debugOnce:  { logged: boolean },
-): Promise<BsaleStock[]> {
-  try {
-    // Bsale API uses lowercase: variantid / officeid (not camelCase)
-    const qs = new URLSearchParams({ variantid: variantId, expand: "[office]", limit: "50" });
+interface BsaleStockIndex {
+  byVariantId: Map<string, number>;                               // variantId → qty
+  byCode:      Map<string, { variantId: string; quantity: number }>; // sku_code → data
+}
+
+async function fetchAllStocksForOffice(
+  token:    string,
+  officeId: number | null,
+): Promise<BsaleStockIndex> {
+  const byVariantId = new Map<string, number>();
+  const byCode      = new Map<string, { variantId: string; quantity: number }>();
+  const LIMIT       = 50;
+  const PARALLEL    = 5;
+
+  const buildQs = (offset: number) => {
+    const qs = new URLSearchParams({ expand: "[variant]", limit: String(LIMIT), offset: String(offset) });
     if (officeId) qs.set("officeid", String(officeId));
+    return qs.toString();
+  };
 
-    const page = await get<BsalePage<BsaleStock>>(`/stocks.json?${qs}`, token);
-    const items = page.items ?? [];
+  const addItems = (items: BsaleStockRecord[]) => {
+    for (const item of items) {
+      const variantId = item.variant?.id;
+      const code      = item.variant?.code?.trim().toUpperCase();
+      const qty       = Math.max(0, Math.round(item.quantity));
+      if (!variantId) continue;
 
-    if (!debugOnce.logged && items.length > 0) {
-      debugOnce.logged = true;
-      console.log(`[stock-sync] Bsale returned ${items.length} stock record(s) for variantId=${variantId} — raw[0]:`, JSON.stringify(items[0], null, 2));
+      const prev = byVariantId.get(variantId);
+      byVariantId.set(variantId, Math.max(prev ?? 0, qty));
+
+      if (code) {
+        const prevEntry = byCode.get(code);
+        if (!prevEntry || qty > prevEntry.quantity) {
+          byCode.set(code, { variantId, quantity: qty });
+        }
+      }
     }
+  };
 
-    return items;
-  } catch {
-    return [];
-  }
-}
+  // Page 0: get total count + first batch of items
+  const firstPage = await get<BsalePage<BsaleStockRecord>>(`/stocks.json?${buildQs(0)}`, token);
+  const total     = firstPage.count ?? 0;
+  const totalPages = Math.ceil(total / LIMIT);
 
-async function resolveBsaleVariantId(skuCode: string, token: string): Promise<string | null> {
-  try {
-    const page = await get<BsalePage<BsaleVariant>>(
-      `/variants.json?code=${encodeURIComponent(skuCode)}&limit=1`,
-      token,
+  console.log(`[stock-sync] Bsale stocks for office ${officeId ?? "all"}: ${total} records, ${totalPages} pages`);
+  addItems(firstPage.items ?? []);
+
+  // Remaining pages in parallel batches of PARALLEL
+  for (let page = 1; page < totalPages; page += PARALLEL) {
+    const offsets = Array.from(
+      { length: Math.min(PARALLEL, totalPages - page) },
+      (_, i) => (page + i) * LIMIT,
     );
-    const first = page.items?.[0];
-    return first ? String(first.id) : null;
-  } catch {
-    return null;
-  }
-}
+    const pages = await Promise.all(
+      offsets.map((offset) =>
+        get<BsalePage<BsaleStockRecord>>(`/stocks.json?${buildQs(offset)}`, token)
+          .then((p) => p.items ?? [])
+          .catch(() => [] as BsaleStockRecord[]),
+      ),
+    );
+    for (const items of pages) addItems(items);
 
-async function runConcurrent<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-  const results: T[] = [];
-  for (let i = 0; i < tasks.length; i += concurrency) {
-    const batch = await Promise.all(tasks.slice(i, i + concurrency).map((fn) => fn()));
-    results.push(...batch);
+    if (page % 50 === 1) {
+      console.log(`[stock-sync] fetched up to page ${page + PARALLEL - 1}/${totalPages}`);
+    }
   }
-  return results;
+
+  console.log(`[stock-sync] Bsale index: ${byVariantId.size} variants, ${byCode.size} with code`);
+  return { byVariantId, byCode };
 }
 
 // ── Sync ──────────────────────────────────────────────────────────────────────
 
-type SyncEntry = {
-  skuId:           string;
-  skuCode:         string;
-  title:           string | null;
-  variantId:       string;       // Bsale variant ID
-  shopifyVariantId: number | null; // Shopify variant ID
+type MatchedEntry = {
+  skuId:            string;
+  skuCode:          string;
+  title:            string | null;
+  shopifyVariantId: number | null;
+  bsaleQty:         number;
 };
 
 export async function syncBsaleStockToSkuBeam(
@@ -151,8 +169,7 @@ export async function syncBsaleStockToSkuBeam(
     synced: 0, shopify_updated: 0, errors: 0, error_details: [], items: [], synced_at: now,
   };
 
-  // 1. All Shopify-published SKUs (include shopify_variant_id for Shopify push)
-  // Supabase default cap is 1000 rows — override to cover up to 10k SKUs
+  // 1. All Shopify-published SKUs (limit 10000 — Supabase default cap is 1000)
   const { data: skuRows, error: skuErr } = await supabaseAdmin
     .from("skus")
     .select("id, sku_code, title, bsale_variant_id, shopify_variant_id")
@@ -166,112 +183,87 @@ export async function syncBsaleStockToSkuBeam(
   console.log("[stock-sync] Shopify-published SKUs:", shopifySkus.length);
   if (shopifySkus.length === 0) return empty;
 
-  // 2. Resolve bsale_variant_id for SKUs that don't have it yet
-  const withId    = shopifySkus.filter((s) => s.bsale_variant_id);
-  const withoutId = shopifySkus.filter((s) => !s.bsale_variant_id);
+  // 2. Bulk fetch ALL stocks for the configured office — one paginated pass
+  const bsaleIndex = await fetchAllStocksForOffice(token, officeId);
 
-  console.log("[stock-sync] with bsale_variant_id:", withId.length, "| need lookup:", withoutId.length);
+  // 3. Match each Shopify SKU to Bsale stock (in memory, no extra API calls)
+  const matched:           MatchedEntry[] = [];
+  const skippedCodes:      string[]       = [];
+  const toSaveVariantId:   Array<{ id: string; bsale_variant_id: string }> = [];
 
-  const resolved: SyncEntry[] = [];
+  for (const sku of shopifySkus) {
+    let qty:               number | null  = null;
+    let resolvedVariantId: string | null  = (sku.bsale_variant_id as string | null) ?? null;
 
-  if (withoutId.length > 0) {
-    const lookupResults = await runConcurrent(
-      withoutId.map((s) => async () => ({
-        skuId: s.id, skuCode: s.sku_code, title: s.title,
-        shopifyVariantId: s.shopify_variant_id as number | null,
-        variantId: await resolveBsaleVariantId(s.sku_code, token),
-      })),
-      5,
-    );
+    // Fast path: already have bsale_variant_id
+    if (resolvedVariantId) {
+      const q = bsaleIndex.byVariantId.get(resolvedVariantId);
+      if (q !== undefined) qty = q;
+    }
 
-    const toUpdate: Array<{ id: string; bsale_variant_id: string }> = [];
-    for (const r of lookupResults) {
-      if (r.variantId) {
-        resolved.push({
-          skuId: r.skuId, skuCode: r.skuCode, title: r.title,
-          variantId: r.variantId, shopifyVariantId: r.shopifyVariantId,
-        });
-        toUpdate.push({ id: r.skuId, bsale_variant_id: r.variantId });
+    // Fallback: match by sku_code
+    if (qty === null) {
+      const codeMatch = bsaleIndex.byCode.get(sku.sku_code?.trim().toUpperCase() ?? "");
+      if (codeMatch) {
+        qty = codeMatch.quantity;
+        if (!resolvedVariantId) {
+          resolvedVariantId = codeMatch.variantId;
+          toSaveVariantId.push({ id: sku.id, bsale_variant_id: codeMatch.variantId });
+        }
       }
     }
-    for (const u of toUpdate) {
-      await supabaseAdmin.from("skus").update({ bsale_variant_id: u.bsale_variant_id }).eq("id", u.id);
+
+    if (qty === null) {
+      skippedCodes.push(sku.sku_code);
+    } else {
+      matched.push({
+        skuId:            sku.id,
+        skuCode:          sku.sku_code,
+        title:            sku.title,
+        shopifyVariantId: sku.shopify_variant_id as number | null,
+        bsaleQty:         qty,
+      });
     }
-    if (toUpdate.length > 0) console.log("[stock-sync] saved bsale_variant_id for", toUpdate.length, "SKUs");
   }
 
-  const allEntries: SyncEntry[] = [
-    ...withId.map((s) => ({
-      skuId: s.id, skuCode: s.sku_code, title: s.title,
-      variantId: s.bsale_variant_id as string,
-      shopifyVariantId: s.shopify_variant_id as number | null,
-    })),
-    ...resolved,
-  ];
-
-  const notFound = shopifySkus.length - allEntries.length;
-  console.log("[stock-sync] fetching stock for", allEntries.length, "variants |", notFound, "not found in Bsale");
-
-  // 3. Fetch stock from Bsale in parallel batches of 5
-  if (officeId) {
-    console.log("[stock-sync] filtering by officeId:", officeId);
-  } else {
-    console.warn("[stock-sync] no officeId configured — fetching all offices");
+  // Persist newly resolved bsale_variant_ids (sequential — rare on re-syncs)
+  for (const u of toSaveVariantId) {
+    await supabaseAdmin.from("skus").update({ bsale_variant_id: u.bsale_variant_id }).eq("id", u.id);
+  }
+  if (toSaveVariantId.length > 0) {
+    console.log(`[stock-sync] saved bsale_variant_id for ${toSaveVariantId.length} SKUs`);
   }
 
-  const debugOnce = { logged: false };
-  const fetched = await runConcurrent(
-    allEntries.map((e) => async () => {
-      const stocks = await fetchStockForVariant(e.variantId, token, officeId, debugOnce);
-      return { ...e, stocks };
-    }),
-    5,
-  );
+  console.log(`[stock-sync] matched: ${matched.length} | not in Bsale: ${skippedCodes.length}`);
 
-  // 4. Build deduplicated inventory_levels rows (max qty per sku+office)
-  const rowMap = new Map<string, {
+  if (matched.length === 0) {
+    return { ...empty, total_bsale_sku_codes: shopifySkus.length, skipped: skippedCodes.length };
+  }
+
+  // 4. Build afterMap + inventory_levels rows
+  const afterMap = new Map<string, number>();
+  const rows: Array<{
     shop_id: string; sku_id: string; shopify_location_id: number;
     location_name: string; quantity: number; updated_at: string;
-  }>();
+  }> = [];
 
-  for (const { skuId, stocks } of fetched) {
-    for (const s of stocks) {
-      const locationId = s.officeId ?? s.office?.id;
-      if (!locationId) continue;
-      const key = `${skuId}:${locationId}`;
-      const qty = Math.max(0, Math.round(s.quantity));
-      const existing = rowMap.get(key);
-      if (existing) {
-        existing.quantity = Math.max(existing.quantity, qty);
-      } else {
-        rowMap.set(key, {
-          shop_id:             shopId,
-          sku_id:              skuId,
-          shopify_location_id: locationId,
-          location_name:       s.office?.name ?? `Oficina ${locationId}`,
-          quantity:            qty,
-          updated_at:          now,
-        });
-      }
+  for (const entry of matched) {
+    afterMap.set(entry.skuId, entry.bsaleQty);
+    if (officeId != null) {
+      rows.push({
+        shop_id:             shopId,
+        sku_id:              entry.skuId,
+        shopify_location_id: officeId,
+        location_name:       `Bsale Oficina ${officeId}`,
+        quantity:            entry.bsaleQty,
+        updated_at:          now,
+      });
     }
   }
 
-  // afterMap: stock at the configured office only.
-  // Bsale may return records for ALL offices even when officeId is passed as a query param.
-  // Filter client-side so we never sum across all offices.
-  const afterMap = new Map<string, number>();
-  for (const row of rowMap.values()) {
-    if (officeId && row.shopify_location_id !== officeId) continue;
-    afterMap.set(row.sku_id, (afterMap.get(row.sku_id) ?? 0) + row.quantity);
-  }
+  console.log(`[stock-sync] upserting ${rows.length} inventory_level rows`);
 
-  // Only upsert the configured office row (drop other offices from rowMap)
-  const rows = officeId
-    ? [...rowMap.values()].filter((r) => r.shopify_location_id === officeId)
-    : [...rowMap.values()];
-  console.log("[stock-sync] inventory_level rows to upsert:", rows.length);
-
-  // 5. Upsert inventory_levels in Supabase
+  // 5. Upsert to inventory_levels in batches of 200
   let synced = 0;
   let errors = 0;
   const errorDetails: StockSyncErrorDetail[] = [];
@@ -283,11 +275,15 @@ export async function syncBsaleStockToSkuBeam(
       .upsert(batch, { onConflict: "sku_id,shopify_location_id" });
 
     if (error) {
-      console.error(`[syncBsaleStockToSkuBeam] batch ${i}:`, error.message);
+      console.error(`[stock-sync] upsert batch ${i}:`, error.message);
       errors += batch.length;
       for (const row of batch as Array<{ sku_id: string }>) {
-        const entry = fetched.find((f) => f.skuId === row.sku_id);
-        errorDetails.push({ sku_code: entry?.skuCode ?? row.sku_id, title: entry?.title ?? null, error: error.message });
+        const entry = matched.find((m) => m.skuId === row.sku_id);
+        errorDetails.push({
+          sku_code: entry?.skuCode ?? row.sku_id,
+          title:    entry?.title ?? null,
+          error:    error.message,
+        });
       }
     } else {
       synced += batch.length;
@@ -296,44 +292,38 @@ export async function syncBsaleStockToSkuBeam(
 
   await refreshSkuAnalytics();
 
-  // 6. Push quantities to Shopify and capture before/after from Shopify itself
-  //    beforeMap = Shopify's stock before this push (meaningful comparison)
-  //    On error: fall back silently (beforeMap stays empty = all show 0 before)
-  const beforeMap = new Map<string, number>();
+  // 6. Push to Shopify (beforeMap = Shopify current stock, adjust deltas)
+  const beforeMap    = new Map<string, number>();
   let shopifyUpdated = 0;
+  const NODES_BATCH  = 250;
 
   try {
     const admin = await getShopifyGraphQLClient(shopId);
 
-    const variantGids = allEntries
+    const variantGids = matched
       .filter((e) => e.shopifyVariantId != null)
       .map((e) => `gid://shopify/ProductVariant/${e.shopifyVariantId}`);
 
-    if (variantGids.length === 0) throw new Error("No Shopify variant IDs available");
+    if (variantGids.length === 0) throw new Error("No Shopify variant IDs");
 
-    // Shopify nodes query limit is 250 IDs per call — batch accordingly
-    const NODES_BATCH = 250;
-
-    // Fetch location + inventory items in parallel (items batched)
-    const locRes = await admin.graphql(`#graphql
+    // Get location GID
+    const locRes  = await admin.graphql(`#graphql
       query GetFirstLocation {
         locations(first: 1, includeLegacy: false) {
           edges { node { id } }
         }
       }`);
-
     const locJson = await locRes.json() as {
       data?: { locations?: { edges: Array<{ node: { id: string } }> } };
     };
-
     const locationGid = locJson.data?.locations?.edges[0]?.node.id;
-    if (!locationGid) throw new Error("[stock-sync] No active Shopify location found");
+    if (!locationGid) throw new Error("No active Shopify location");
 
-    // shopifyVariantId → inventoryItemId GID (batch in 250s)
-    const itemMap = new Map<number, string>();
+    // Get inventoryItemId per variant (batched in 250)
+    const itemMap = new Map<number, string>(); // shopifyVariantId → inventoryItemId GID
     for (let i = 0; i < variantGids.length; i += NODES_BATCH) {
       const batch = variantGids.slice(i, i + NODES_BATCH);
-      const res = await admin.graphql(
+      const res   = await admin.graphql(
         `#graphql
         query GetVariantInventoryItems($ids: [ID!]!) {
           nodes(ids: $ids) {
@@ -354,7 +344,7 @@ export async function syncBsaleStockToSkuBeam(
 
     console.log(`[stock-sync] resolved inventoryItemId for ${itemMap.size} variants`);
 
-    // Query current Shopify quantities for beforeMap (batch in 250s)
+    // Query current Shopify quantities for beforeMap (batched in 250)
     const inventoryItemGids = [...new Set(itemMap.values())];
     const allQtyNodes: Array<{
       id: string;
@@ -362,7 +352,7 @@ export async function syncBsaleStockToSkuBeam(
     } | null> = [];
 
     for (let i = 0; i < inventoryItemGids.length; i += NODES_BATCH) {
-      const batch = inventoryItemGids.slice(i, i + NODES_BATCH);
+      const batch  = inventoryItemGids.slice(i, i + NODES_BATCH);
       const qtyRes = await admin.graphql(
         `#graphql
         query GetInventoryQuantities($ids: [ID!]!, $locId: ID!) {
@@ -388,43 +378,39 @@ export async function syncBsaleStockToSkuBeam(
       allQtyNodes.push(...(qtyJson.data?.nodes ?? []));
     }
 
-    // inventoryItemGid → skuId
-    const itemToSku = new Map<string, string>();
+    // Build beforeMap (Shopify pre-sync quantities)
+    const itemToSku = new Map<string, string>(); // inventoryItemGid → skuId
     for (const [varId, itemGid] of itemMap.entries()) {
-      const entry = allEntries.find((e) => e.shopifyVariantId === varId);
+      const entry = matched.find((e) => e.shopifyVariantId === varId);
       if (entry) itemToSku.set(itemGid, entry.skuId);
     }
-
     for (const node of allQtyNodes) {
       if (!node) continue;
       const skuId = itemToSku.get(node.id);
       if (!skuId) continue;
-      const available = node.inventoryLevel?.quantities?.find((q) => q.name === "available")?.quantity ?? 0;
-      beforeMap.set(skuId, available);
+      const qty = node.inventoryLevel?.quantities?.find((q) => q.name === "available")?.quantity ?? 0;
+      beforeMap.set(skuId, qty);
     }
 
     console.log(`[stock-sync] Shopify beforeMap built for ${beforeMap.size} SKUs`);
 
-    // Build delta changes (Bsale qty − Shopify current qty)
-    // Using inventoryAdjustQuantities (same pattern as realtime.server.ts — proven to work)
+    // Compute deltas and adjust (inventoryAdjustQuantities — proven pattern)
     const changes: Array<{ inventoryItemId: string; locationId: string; delta: number }> = [];
-    for (const entry of allEntries) {
+    for (const entry of matched) {
       if (entry.shopifyVariantId == null) continue;
-      const itemGid   = itemMap.get(entry.shopifyVariantId);
+      const itemGid    = itemMap.get(entry.shopifyVariantId);
       if (!itemGid) continue;
       const shopifyQty = beforeMap.get(entry.skuId) ?? 0;
       const bsaleQty   = afterMap.get(entry.skuId) ?? 0;
       const delta      = bsaleQty - shopifyQty;
-      if (delta === 0) {
-        shopifyUpdated++; // Already correct — count as success
-        continue;
-      }
+      if (delta === 0) { shopifyUpdated++; continue; }
       changes.push({ inventoryItemId: itemGid, locationId: locationGid, delta });
     }
 
-    // Apply deltas in batches of 100
+    console.log(`[stock-sync] Shopify: ${changes.length} adjustments needed, ${matched.length - changes.length} already correct`);
+
     for (let i = 0; i < changes.length; i += 100) {
-      const batch = changes.slice(i, i + 100);
+      const batch     = changes.slice(i, i + 100);
       const adjustRes = await admin.graphql(
         `#graphql
         mutation AdjustInventory($input: InventoryAdjustQuantitiesInput!) {
@@ -433,26 +419,11 @@ export async function syncBsaleStockToSkuBeam(
             inventoryAdjustmentGroup { createdAt }
           }
         }`,
-        {
-          variables: {
-            input: {
-              reason:  "correction",
-              name:    "available",
-              changes: batch,
-            },
-          },
-        },
+        { variables: { input: { reason: "correction", name: "available", changes: batch } } },
       );
-
       const adjustJson = await adjustRes.json() as {
-        data?: {
-          inventoryAdjustQuantities?: {
-            userErrors:               Array<{ field: string; message: string }>;
-            inventoryAdjustmentGroup: { createdAt: string } | null;
-          };
-        };
+        data?: { inventoryAdjustQuantities?: { userErrors: Array<{ field: string; message: string }> } };
       };
-
       const errs = adjustJson.data?.inventoryAdjustQuantities?.userErrors ?? [];
       if (errs.length > 0) {
         console.error("[stock-sync] inventoryAdjustQuantities errors:", JSON.stringify(errs));
@@ -461,25 +432,17 @@ export async function syncBsaleStockToSkuBeam(
       }
     }
 
-    console.log(`[stock-sync] Shopify: ${shopifyUpdated} synced (${changes.length} adjusted, ${allEntries.length - changes.length} already correct)`);
+    console.log(`[stock-sync] Shopify updated: ${shopifyUpdated} / ${matched.length}`);
   } catch (err) {
-    console.error("[stock-sync] Shopify push failed (sync still saved to DB):", err);
+    console.error("[stock-sync] Shopify push failed (sync saved to DB):", err);
   }
 
-  // 7. Build per-SKU before/after detail
-  //    qty_before = Shopify stock before push (or 0 if Shopify fetch failed)
-  //    qty_after  = Bsale stock (what was pushed to Shopify)
-  const items: StockSyncItemDetail[] = allEntries
+  // 7. Build per-SKU comparison (Shopify before vs Bsale after)
+  const items: StockSyncItemDetail[] = matched
     .map((e) => {
       const before = beforeMap.get(e.skuId) ?? 0;
-      const after  = afterMap.get(e.skuId) ?? 0;
-      return {
-        sku_code:   e.skuCode,
-        title:      e.title,
-        qty_before: before,
-        qty_after:  after,
-        changed:    before !== after,
-      };
+      const after  = afterMap.get(e.skuId)  ?? 0;
+      return { sku_code: e.skuCode, title: e.title, qty_before: before, qty_after: after, changed: before !== after };
     })
     .sort((a, b) => {
       if (a.changed !== b.changed) return a.changed ? -1 : 1;
@@ -488,8 +451,8 @@ export async function syncBsaleStockToSkuBeam(
 
   return {
     total_bsale_sku_codes: shopifySkus.length,
-    shopify_matched:       allEntries.length,
-    skipped:               notFound,
+    shopify_matched:       matched.length,
+    skipped:               skippedCodes.length,
     synced,
     shopify_updated:       shopifyUpdated,
     errors,
