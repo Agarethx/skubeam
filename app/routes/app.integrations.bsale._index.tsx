@@ -1,6 +1,9 @@
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
+import type { StockSyncResult, StockSyncItemDetail } from "../integrations/bsale/stocks.server";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useEffect, useRef, useState } from "react";
+
+type StockSyncPayload = StockSyncResult;
 import { useSkuBeamNavigate } from "../lib/navigate";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate, registerWebhooks } from "../shopify.server";
@@ -25,7 +28,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopId = session.shop;
 
-  const [shopRow, activeJob, recentBoletas] = await Promise.all([
+  const [shopRow, activeJob, recentBoletas, lastStockJob] = await Promise.all([
     supabaseAdmin
       .from("shops")
       .select("bsale_token, bsale_last_sync, active_addons, bsale_price_list_id, bsale_office_id, bsale_document_type_id, bsale_document_code_sii")
@@ -40,6 +43,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .order("created_at", { ascending: false })
       .limit(5)
       .then(({ data }) => data ?? []),
+    supabaseAdmin
+      .from("sync_jobs")
+      .select("id, records_processed, completed_at, payload")
+      .eq("shop_id", shopId)
+      .eq("type", "bsale_stock")
+      .eq("status", "completed")
+      .order("completed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(({ data }) => data),
   ]);
 
   const hasToken     = !!shopRow?.bsale_token;
@@ -75,6 +88,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     priceLists,
     offices,
     documentTypes,
+    lastStockSync:  lastStockJob?.payload as StockSyncPayload | null ?? null,
+    lastStockSyncAt: lastStockJob?.completed_at ?? null,
   };
 };
 
@@ -282,6 +297,131 @@ function WizardHeader({ step, onReset }: { step: 1 | 2 | 3 | 4; onReset?: () => 
   );
 }
 
+// ── Shared table primitives ───────────────────────────────────────────────────
+
+const TH_STYLE: React.CSSProperties = {
+  padding:       "8px 12px",
+  background:    "var(--p-color-bg-surface-secondary, #f6f6f7)",
+  borderBottom:  "1px solid var(--p-color-border, #e1e3e5)",
+  fontSize:      "var(--p-font-size-300, 0.75rem)",
+  fontWeight:    600,
+  color:         "var(--p-color-text-subdued, #6d7175)",
+  textTransform: "uppercase" as const,
+  letterSpacing: "0.04em",
+  textAlign:     "left" as const,
+};
+
+const TD_STYLE: React.CSSProperties = {
+  padding:  "10px 12px",
+  fontSize: "var(--p-font-size-350, 0.875rem)",
+  verticalAlign: "middle",
+};
+
+function SimpleTable({ cols, rows }: { cols: string[]; rows: React.ReactNode[][] }) {
+  return (
+    <div style={{ border: "1px solid var(--p-color-border, #e1e3e5)", borderRadius: "var(--p-border-radius-200, 8px)", overflow: "hidden" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr>{cols.map((c) => <th key={c} style={TH_STYLE}>{c}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => (
+            <tr key={ri} style={{ background: ri % 2 === 0 ? "var(--p-color-bg-surface, #fff)" : "var(--p-color-bg-surface-secondary, #f6f6f7)" }}>
+              {row.map((cell, ci) => (
+                <td key={ci} style={{ ...TD_STYLE, borderBottom: ri < rows.length - 1 ? "1px solid var(--p-color-border-subdued, #e1e3e5)" : "none" }}>
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const PAGE_SIZE_DETAIL = 20;
+
+function StockDetailTable({
+  items,
+  page,
+  onPageChange,
+}: {
+  items:        StockSyncItemDetail[];
+  page:         number;
+  onPageChange: (p: number) => void;
+}) {
+  const totalPages = Math.ceil(items.length / PAGE_SIZE_DETAIL);
+  const slice      = items.slice((page - 1) * PAGE_SIZE_DETAIL, page * PAGE_SIZE_DETAIL);
+
+  const changedCount   = items.filter((i) => i.changed).length;
+  const unchangedCount = items.length - changedCount;
+
+  return (
+    <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+      <s-stack direction="block" gap="small">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <p style={HEADING_STYLE}>Detalle por SKU</p>
+          <div style={{ display: "flex", gap: 8 }}>
+            {changedCount > 0   && <s-badge tone="success">{changedCount} actualizados</s-badge>}
+            {unchangedCount > 0 && <s-badge tone="neutral">{unchangedCount} sin cambio</s-badge>}
+          </div>
+        </div>
+
+        <SimpleTable
+          cols={["SKU", "Título", "Stock Shopify", "Stock Bsale", "Cambio"]}
+          rows={slice.map((item) => {
+            const diff    = item.qty_after - item.qty_before;
+            const diffStr = diff > 0 ? `+${diff}` : String(diff);
+            const diffColor = diff > 0
+              ? "var(--p-color-text-success, #008060)"
+              : diff < 0
+              ? "var(--p-color-text-critical, #d72c0d)"
+              : "var(--p-color-text-subdued, #6d7175)";
+
+            return [
+              <span style={{ fontFamily: "monospace", fontWeight: 600 }}>{item.sku_code}</span>,
+              <span style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>{item.title ?? "—"}</span>,
+              <span style={{ textAlign: "right" as const, display: "block" }}>{item.qty_before.toLocaleString("es-CL")}</span>,
+              <span style={{ textAlign: "right" as const, display: "block", fontWeight: item.changed ? 600 : 400 }}>
+                {item.qty_after.toLocaleString("es-CL")}
+              </span>,
+              <span style={{ color: diffColor, fontWeight: 600, textAlign: "right" as const, display: "block" }}>
+                {diff === 0 ? "—" : diffStr}
+              </span>,
+            ];
+          })}
+        />
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 8 }}>
+            <s-text color="subdued">
+              {(page - 1) * PAGE_SIZE_DETAIL + 1}–{Math.min(page * PAGE_SIZE_DETAIL, items.length)} de {items.length} SKUs
+            </s-text>
+            <div style={{ display: "flex", gap: 8 }}>
+              <s-button
+                variant="tertiary"
+                {...(page <= 1 ? { disabled: true } : {})}
+                onClick={() => onPageChange(page - 1)}
+              >
+                ← Anterior
+              </s-button>
+              <s-button
+                variant="tertiary"
+                {...(page >= totalPages ? { disabled: true } : {})}
+                onClick={() => onPageChange(page + 1)}
+              >
+                Siguiente →
+              </s-button>
+            </div>
+          </div>
+        )}
+      </s-stack>
+    </s-box>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function BsaleIntegrationPage() {
@@ -290,6 +430,7 @@ export default function BsaleIntegrationPage() {
     priceListId, officeId, documentTypeId, documentCodeSii,
     bsaleLastSync, activeJob, hasAddon, recentBoletas,
     priceLists, offices, documentTypes,
+    lastStockSync, lastStockSyncAt,
   } = useLoaderData<typeof loader>();
 
   const revalidator = useRevalidator();
@@ -304,6 +445,7 @@ export default function BsaleIntegrationPage() {
   const [selectedPriceListId,  setSelectedPriceListId]  = useState<number | "">(priceListId ?? "");
   const [selectedOfficeId,     setSelectedOfficeId]     = useState<number | "">(officeId ?? "");
   const [selectedDocTypeId,    setSelectedDocTypeId]    = useState<number | "">(documentTypeId ?? "");
+  const [stockDetailPage,      setStockDetailPage]      = useState(1);
 
   // Fetchers
   const tokenFetcher   = useFetcher<{ success?: string; error?: string; tokenSaved?: boolean }>();
@@ -773,6 +915,64 @@ export default function BsaleIntegrationPage() {
 
             </s-grid>
           </s-section>
+
+          {/* ── Último sync de stock ─────────────────────────────────────── */}
+          {lastStockSync && (
+            <s-section heading="Último sync de stock">
+              {/* Stats row */}
+              <s-grid gridTemplateColumns="repeat(auto-fit, minmax(140px, 1fr))" gap="base">
+                {(
+                  [
+                    { label: "En Bsale",          value: lastStockSync.total_bsale_sku_codes, tone: undefined },
+                    { label: "En Shopify",         value: lastStockSync.shopify_matched,       tone: "success" as const },
+                    { label: "No en Bsale",        value: lastStockSync.skipped,               tone: lastStockSync.skipped > 0 ? "warning" as const : undefined },
+                    { label: "Sync Shopify",       value: lastStockSync.shopify_updated ?? 0,  tone: (lastStockSync.shopify_updated ?? 0) > 0 ? "success" as const : undefined },
+                    { label: "Con error",          value: lastStockSync.errors,                tone: lastStockSync.errors > 0 ? "critical" as const : undefined },
+                  ] as Array<{ label: string; value: number; tone?: "success" | "warning" | "critical" }>
+                ).map(({ label, value, tone }) => (
+                  <s-box key={label} padding="base" borderWidth="small" borderRadius="base" background="base">
+                    <s-stack direction="block" gap="small">
+                      <s-text color="subdued">{label}</s-text>
+                      {tone
+                        ? <s-badge tone={tone}>{value.toLocaleString("es-CL")}</s-badge>
+                        : <p style={{ margin: 0, fontWeight: 600, fontSize: "var(--p-font-size-500, 1.25rem)" }}>{value.toLocaleString("es-CL")}</p>
+                      }
+                    </s-stack>
+                  </s-box>
+                ))}
+              </s-grid>
+
+              <s-text color="subdued">Ejecutado: {formatDate(lastStockSyncAt)}</s-text>
+
+              {/* ── Detalle por SKU ── */}
+              {lastStockSync.items && lastStockSync.items.length > 0 && (
+                <StockDetailTable
+                  items={lastStockSync.items}
+                  page={stockDetailPage}
+                  onPageChange={setStockDetailPage}
+                />
+              )}
+
+              {/* Error details */}
+              {lastStockSync.error_details.length > 0 && (
+                <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+                  <s-stack direction="block" gap="small">
+                    <p style={{ ...HEADING_STYLE, color: "var(--p-color-text-critical, #d72c0d)" }}>
+                      SKUs con error ({lastStockSync.error_details.length})
+                    </p>
+                    <SimpleTable
+                      cols={["SKU", "Título", "Error"]}
+                      rows={lastStockSync.error_details.map((d) => [
+                        <span style={{ fontFamily: "monospace", fontWeight: 600 }}>{d.sku_code}</span>,
+                        d.title ?? "—",
+                        <span style={{ color: "var(--p-color-text-critical, #d72c0d)", fontSize: "var(--p-font-size-300, 0.75rem)" }}>{d.error}</span>,
+                      ])}
+                    />
+                  </s-stack>
+                </s-box>
+              )}
+            </s-section>
+          )}
 
           {/* Boleta electrónica */}
           <s-section heading="Nota de Venta automática">

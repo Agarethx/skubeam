@@ -25,10 +25,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .maybeSingle();
 
   // Dead job detection: mark as failed if a job runs too long without completing.
-  // woo_migration jobs get 12 hours (rate-limited, large catalogs can take hours).
+  // woo_migration jobs get 24 hours (rate-limited, large catalogs can take hours).
+  // bsale_products gets 30 min (large Bsale catalogs can have many pages).
   // All other jobs get 10 minutes.
-  const isWooJob     = data?.type === "woo_migration" || data?.type === "woo_migration_preview";
-  const jobTimeoutMs = isWooJob ? 24 * 60 * 60 * 1000 : 10 * 60 * 1000;
+  const isWooJob    = data?.type === "woo_migration" || data?.type === "woo_migration_preview";
+  const isBsaleSync = data?.type === "bsale_products" || data?.type === "bsale_stock";
+  const jobTimeoutMs = isWooJob ? 24 * 60 * 60 * 1000 : isBsaleSync ? 30 * 60 * 1000 : 10 * 60 * 1000;
   if (data?.status === "running" && data.started_at) {
     const ageMs = Date.now() - new Date(data.started_at).getTime();
     if (ageMs > jobTimeoutMs) {

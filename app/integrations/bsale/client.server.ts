@@ -1,6 +1,6 @@
 const BASE_URL = "https://api.bsale.io/v1";
 
-interface BsalePage<T> {
+export interface BsalePage<T> {
   count:   number;
   limit:   number;
   offset:  number;

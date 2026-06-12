@@ -34,10 +34,15 @@ export async function getActiveBsaleJob(shopId: string) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-async function completeJob(jobId: string, synced: number) {
+async function completeJob(jobId: string, synced: number, payload?: object) {
   await supabaseAdmin
     .from("sync_jobs")
-    .update({ status: "completed", records_processed: synced, completed_at: new Date().toISOString() })
+    .update({
+      status:            "completed",
+      records_processed: synced,
+      completed_at:      new Date().toISOString(),
+      ...(payload ? { payload } : {}),
+    })
     .eq("id", jobId);
 }
 
@@ -52,16 +57,16 @@ async function failJob(jobId: string, err: unknown) {
     .eq("id", jobId);
 }
 
-async function resolveShopToken(shopId: string): Promise<string> {
+async function resolveShopConfig(shopId: string): Promise<{ token: string; officeId: number | null }> {
   const { data } = await supabaseAdmin
     .from("shops")
-    .select("bsale_token")
+    .select("bsale_token, bsale_office_id")
     .eq("shop_id", shopId)
     .single();
 
   const token = data?.bsale_token ?? process.env.BSALE_ACCESS_TOKEN;
   if (!token) throw new Error("No Bsale token configured for this shop.");
-  return token;
+  return { token, officeId: data?.bsale_office_id ?? null };
 }
 
 async function stampLastSync(shopId: string) {
@@ -78,8 +83,8 @@ export async function processBsaleProductsJob(
   shopId: string,
 ): Promise<void> {
   try {
-    const token  = await resolveShopToken(shopId);
-    const result = await syncBsaleToSkuBeam(shopId, token);
+    const { token } = await resolveShopConfig(shopId);
+    const result    = await syncBsaleToSkuBeam(shopId, token);
     await completeJob(jobId, result.synced);
     await stampLastSync(shopId);
   } catch (err) {
@@ -94,11 +99,11 @@ export async function processBsaleStockJob(
 ): Promise<void> {
   console.log("[stock-sync] processBsaleStockJob start — jobId:", jobId, "shop:", shopId);
   try {
-    const token  = await resolveShopToken(shopId);
-    console.log("[stock-sync] token resolved, length:", token.length);
-    const result = await syncBsaleStockToSkuBeam(shopId, token);
-    console.log("[stock-sync] syncBsaleStockToSkuBeam done — synced:", result.synced, "errors:", result.errors);
-    await completeJob(jobId, result.synced);
+    const { token, officeId } = await resolveShopConfig(shopId);
+    console.log("[stock-sync] officeId configured:", officeId);
+    const result = await syncBsaleStockToSkuBeam(shopId, token, officeId);
+    console.log("[stock-sync] done — shopify_matched:", result.shopify_matched, "skipped:", result.skipped, "synced:", result.synced, "errors:", result.errors);
+    await completeJob(jobId, result.synced, result);
     await stampLastSync(shopId);
   } catch (err) {
     console.error("[stock-sync] processBsaleStockJob ERROR:", err);
