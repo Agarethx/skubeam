@@ -36,6 +36,7 @@ export interface StockSyncResult {
   shopify_updated:       number;
   errors:                number;
   error_details:         StockSyncErrorDetail[];
+  skipped_items:         Array<{ sku_code: string; title: string | null }>;
   items:                 StockSyncItemDetail[];
   synced_at:             string;
 }
@@ -185,7 +186,7 @@ export async function syncBsaleStockToSkuBeam(
 
   const empty: StockSyncResult = {
     total_bsale_sku_codes: 0, shopify_matched: 0, skipped: 0,
-    synced: 0, shopify_updated: 0, errors: 0, error_details: [], items: [], synced_at: now,
+    synced: 0, shopify_updated: 0, errors: 0, error_details: [], skipped_items: [], items: [], synced_at: now,
   };
 
   // 1. All Shopify-published SKUs — paginated because Supabase server max_rows=1000
@@ -220,9 +221,9 @@ export async function syncBsaleStockToSkuBeam(
   console.log(`[stock-sync] bsale-phase  elapsed=${((Date.now() - t2) / 1000).toFixed(1)}s`);
 
   // 3. Match each Shopify SKU to Bsale stock (in memory, no extra API calls)
-  const matched:           MatchedEntry[] = [];
-  const skippedCodes:      string[]       = [];
-  const toSaveVariantId:   Array<{ id: string; bsale_variant_id: string }> = [];
+  const matched:         MatchedEntry[] = [];
+  const skippedItems:    Array<{ sku_code: string; title: string | null }> = [];
+  const toSaveVariantId: Array<{ id: string; bsale_variant_id: string }> = [];
 
   for (const sku of shopifySkus) {
     let qty:               number | null  = null;
@@ -247,7 +248,7 @@ export async function syncBsaleStockToSkuBeam(
     }
 
     if (qty === null) {
-      skippedCodes.push(sku.sku_code);
+      skippedItems.push({ sku_code: sku.sku_code, title: sku.title });
     } else {
       matched.push({
         skuId:            sku.id,
@@ -267,10 +268,10 @@ export async function syncBsaleStockToSkuBeam(
     console.log(`[stock-sync] saved bsale_variant_id for ${toSaveVariantId.length} SKUs`);
   }
 
-  console.log(`[stock-sync] match  matched=${matched.length}  skipped=${skippedCodes.length}  new_variant_ids=${toSaveVariantId.length}`);
+  console.log(`[stock-sync] match  matched=${matched.length}  skipped=${skippedItems.length}  new_variant_ids=${toSaveVariantId.length}`);
 
   if (matched.length === 0) {
-    return { ...empty, total_bsale_sku_codes: shopifySkus.length, skipped: skippedCodes.length };
+    return { ...empty, total_bsale_sku_codes: shopifySkus.length, skipped: skippedItems.length, skipped_items: skippedItems };
   }
 
   // 4. Build afterMap + inventory_levels rows
@@ -489,7 +490,7 @@ export async function syncBsaleStockToSkuBeam(
     `[stock-sync] ✓ DONE  shop=${shopId}  officeId=${officeId ?? "none"}` +
     `  bsale_pages=${bsaleIndex.pagesTotal}  bsale_records=${bsaleIndex.recordsTotal}` +
     `  bsale_count_field=${bsaleIndex.bsaleCountField}${bsaleIndex.recordsTotal > bsaleIndex.bsaleCountField && bsaleIndex.bsaleCountField > 0 ? " ⚠COUNT_CAPPED" : ""}` +
-    `  shopify_skus=${shopifySkus.length}  matched=${matched.length}  skipped=${skippedCodes.length}` +
+    `  shopify_skus=${shopifySkus.length}  matched=${matched.length}  skipped=${skippedItems.length}` +
     `  supabase_synced=${synced}  shopify_updated=${shopifyUpdated}  errors=${errors}` +
     `  total=${totalS}s`,
   );
@@ -497,11 +498,12 @@ export async function syncBsaleStockToSkuBeam(
   return {
     total_bsale_sku_codes: shopifySkus.length,
     shopify_matched:       matched.length,
-    skipped:               skippedCodes.length,
+    skipped:               skippedItems.length,
     synced,
     shopify_updated:       shopifyUpdated,
     errors,
     error_details:         errorDetails,
+    skipped_items:         skippedItems,
     items,
     synced_at:             now,
   };

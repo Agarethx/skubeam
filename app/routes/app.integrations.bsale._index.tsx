@@ -340,7 +340,79 @@ function SimpleTable({ cols, rows }: { cols: string[]; rows: React.ReactNode[][]
   );
 }
 
-const PAGE_SIZE_DETAIL = 20;
+const PAGE_SIZE_DETAIL  = 20;
+const PAGE_SIZE_SKIPPED = 25;
+
+function SkippedTable({
+  items,
+}: {
+  items: Array<{ sku_code: string; title: string | null }>;
+}) {
+  const [open, setOpen]   = useState(false);
+  const [page, setPage]   = useState(1);
+  const totalPages        = Math.ceil(items.length / PAGE_SIZE_SKIPPED);
+  const slice             = items.slice((page - 1) * PAGE_SIZE_SKIPPED, page * PAGE_SIZE_SKIPPED);
+
+  return (
+    <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+      <s-stack direction="block" gap="small">
+        <div
+          style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <p style={{ ...HEADING_STYLE, color: "var(--p-color-text-caution, #b98900)" }}>
+              SKUs no encontrados en Bsale
+            </p>
+            <s-badge tone="warning">{items.length}</s-badge>
+          </div>
+          <s-button variant="tertiary">{open ? "Ocultar ▲" : "Ver listado ▼"}</s-button>
+        </div>
+
+        {open && (
+          <>
+            <s-text color="subdued">
+              Estos productos existen en Shopify pero no tienen un código coincidente en Bsale.
+              Su stock no fue actualizado. Revisa que el SKU en Shopify coincida exactamente con el código de variante en Bsale.
+            </s-text>
+
+            <SimpleTable
+              cols={["SKU (Shopify)", "Título"]}
+              rows={slice.map((item) => [
+                <span key="sku" style={{ fontFamily: "monospace", fontWeight: 600 }}>{item.sku_code}</span>,
+                <span key="title" style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>{item.title ?? "—"}</span>,
+              ])}
+            />
+
+            {totalPages > 1 && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 8 }}>
+                <s-text color="subdued">
+                  {(page - 1) * PAGE_SIZE_SKIPPED + 1}–{Math.min(page * PAGE_SIZE_SKIPPED, items.length)} de {items.length}
+                </s-text>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <s-button
+                    variant="tertiary"
+                    {...(page <= 1 ? { disabled: true } : {})}
+                    onClick={(e: Event) => { e.stopPropagation(); setPage(page - 1); }}
+                  >
+                    ← Anterior
+                  </s-button>
+                  <s-button
+                    variant="tertiary"
+                    {...(page >= totalPages ? { disabled: true } : {})}
+                    onClick={(e: Event) => { e.stopPropagation(); setPage(page + 1); }}
+                  >
+                    Siguiente →
+                  </s-button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </s-stack>
+    </s-box>
+  );
+}
 
 function StockDetailTable({
   items,
@@ -358,67 +430,69 @@ function StockDetailTable({
   const unchangedCount = items.length - changedCount;
 
   return (
-    <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
-      <s-stack direction="block" gap="small">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <p style={HEADING_STYLE}>Detalle por SKU</p>
-          <div style={{ display: "flex", gap: 8 }}>
-            {changedCount > 0   && <s-badge tone="success">{changedCount} actualizados</s-badge>}
-            {unchangedCount > 0 && <s-badge tone="neutral">{unchangedCount} sin cambio</s-badge>}
-          </div>
-        </div>
-
-        <SimpleTable
-          cols={["SKU", "Título", "Stock Shopify", "Stock Bsale", "Cambio"]}
-          rows={slice.map((item) => {
-            const diff    = item.qty_after - item.qty_before;
-            const diffStr = diff > 0 ? `+${diff}` : String(diff);
-            const diffColor = diff > 0
-              ? "var(--p-color-text-success, #008060)"
-              : diff < 0
-              ? "var(--p-color-text-critical, #d72c0d)"
-              : "var(--p-color-text-subdued, #6d7175)";
-
-            return [
-              <span key="sku"    style={{ fontFamily: "monospace", fontWeight: 600 }}>{item.sku_code}</span>,
-              <span key="title"  style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>{item.title ?? "—"}</span>,
-              <span key="before" style={{ textAlign: "right" as const, display: "block" }}>{item.qty_before.toLocaleString("es-CL")}</span>,
-              <span key="after"  style={{ textAlign: "right" as const, display: "block", fontWeight: item.changed ? 600 : 400 }}>
-                {item.qty_after.toLocaleString("es-CL")}
-              </span>,
-              <span key="diff"   style={{ color: diffColor, fontWeight: 600, textAlign: "right" as const, display: "block" }}>
-                {diff === 0 ? "—" : diffStr}
-              </span>,
-            ];
-          })}
-        />
-
-        {/* Pagination */}
-        {totalPages > 1 && (
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 8 }}>
-            <s-text color="subdued">
-              {(page - 1) * PAGE_SIZE_DETAIL + 1}–{Math.min(page * PAGE_SIZE_DETAIL, items.length)} de {items.length} SKUs
-            </s-text>
+    <div style={{ marginBottom: 16 }}>
+      <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+        <s-stack direction="block" gap="small">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <p style={HEADING_STYLE}>Detalle por SKU</p>
             <div style={{ display: "flex", gap: 8 }}>
-              <s-button
-                variant="tertiary"
-                {...(page <= 1 ? { disabled: true } : {})}
-                onClick={() => onPageChange(page - 1)}
-              >
-                ← Anterior
-              </s-button>
-              <s-button
-                variant="tertiary"
-                {...(page >= totalPages ? { disabled: true } : {})}
-                onClick={() => onPageChange(page + 1)}
-              >
-                Siguiente →
-              </s-button>
+              {changedCount > 0   && <s-badge tone="success">{changedCount} actualizados</s-badge>}
+              {unchangedCount > 0 && <s-badge tone="neutral">{unchangedCount} sin cambio</s-badge>}
             </div>
           </div>
-        )}
-      </s-stack>
-    </s-box>
+
+          <SimpleTable
+            cols={["SKU", "Título", "Stock Shopify", "Stock Bsale", "Cambio"]}
+            rows={slice.map((item) => {
+              const diff    = item.qty_after - item.qty_before;
+              const diffStr = diff > 0 ? `+${diff}` : String(diff);
+              const diffColor = diff > 0
+                ? "var(--p-color-text-success, #008060)"
+                : diff < 0
+                ? "var(--p-color-text-critical, #d72c0d)"
+                : "var(--p-color-text-subdued, #6d7175)";
+
+              return [
+                <span key="sku"    style={{ fontFamily: "monospace", fontWeight: 600 }}>{item.sku_code}</span>,
+                <span key="title"  style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>{item.title ?? "—"}</span>,
+                <span key="before" style={{ textAlign: "right" as const, display: "block" }}>{item.qty_before.toLocaleString("es-CL")}</span>,
+                <span key="after"  style={{ textAlign: "right" as const, display: "block", fontWeight: item.changed ? 600 : 400 }}>
+                  {item.qty_after.toLocaleString("es-CL")}
+                </span>,
+                <span key="diff"   style={{ color: diffColor, fontWeight: 600, textAlign: "right" as const, display: "block" }}>
+                  {diff === 0 ? "—" : diffStr}
+                </span>,
+              ];
+            })}
+          />
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 8 }}>
+              <s-text color="subdued">
+                {(page - 1) * PAGE_SIZE_DETAIL + 1}–{Math.min(page * PAGE_SIZE_DETAIL, items.length)} de {items.length} SKUs
+              </s-text>
+              <div style={{ display: "flex", gap: 8 }}>
+                <s-button
+                  variant="tertiary"
+                  {...(page <= 1 ? { disabled: true } : {})}
+                  onClick={() => onPageChange(page - 1)}
+                >
+                  ← Anterior
+                </s-button>
+                <s-button
+                  variant="tertiary"
+                  {...(page >= totalPages ? { disabled: true } : {})}
+                  onClick={() => onPageChange(page + 1)}
+                >
+                  Siguiente →
+                </s-button>
+              </div>
+            </div>
+          )}
+        </s-stack>
+      </s-box>
+    </div>
   );
 }
 
@@ -942,7 +1016,9 @@ export default function BsaleIntegrationPage() {
                 ))}
               </s-grid>
 
-              <s-text color="subdued">Ejecutado: {formatDate(lastStockSyncAt)}</s-text>
+              <div style={{ marginTop: 16, marginBottom: 16 }}>
+                <s-text color="subdued">Ejecutado: {formatDate(lastStockSyncAt)}</s-text>
+              </div>
 
               {/* ── Detalle por SKU ── */}
               {lastStockSync.items && lastStockSync.items.length > 0 && (
@@ -951,6 +1027,11 @@ export default function BsaleIntegrationPage() {
                   page={stockDetailPage}
                   onPageChange={setStockDetailPage}
                 />
+              )}
+
+              {/* SKUs no encontrados en Bsale */}
+              {(lastStockSync.skipped_items ?? []).length > 0 && (
+                <SkippedTable items={lastStockSync.skipped_items ?? []} />
               )}
 
               {/* Error details */}
