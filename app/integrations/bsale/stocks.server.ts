@@ -83,17 +83,20 @@ interface BsaleStockIndex {
 async function fetchAllStocksForOffice(
   token:    string,
   officeId: number | null,
-): Promise<BsaleStockIndex> {
+): Promise<BsaleStockIndex & { pagesTotal: number; recordsTotal: number; bsaleCountField: number }> {
   const byVariantId = new Map<string, number>();
   const byCode      = new Map<string, { variantId: string; quantity: number }>();
   const LIMIT       = 50;
   const PARALLEL    = 5;
+  const t0          = Date.now();
 
   const buildQs = (offset: number) => {
     const qs = new URLSearchParams({ expand: "[variant]", limit: String(LIMIT), offset: String(offset) });
     if (officeId) qs.set("officeid", String(officeId));
     return qs.toString();
   };
+
+  let bsaleCountField = 0;
 
   const addItems = (items: BsaleStockRecord[]) => {
     for (const item of items) {
@@ -114,36 +117,48 @@ async function fetchAllStocksForOffice(
     }
   };
 
-  // Page 0: get total count + first batch of items
-  const firstPage = await get<BsalePage<BsaleStockRecord>>(`/stocks.json?${buildQs(0)}`, token);
-  const total     = firstPage.count ?? 0;
-  const totalPages = Math.ceil(total / LIMIT);
+  // Paginate until we receive fewer items than LIMIT (= last page reached).
+  // Do NOT rely on page.count — Bsale caps it at 1,000 even for larger catalogs.
+  let offset    = 0;
+  let pageIndex = 0;
 
-  console.log(`[stock-sync] Bsale stocks for office ${officeId ?? "all"}: ${total} records, ${totalPages} pages`);
-  addItems(firstPage.items ?? []);
-
-  // Remaining pages in parallel batches of PARALLEL
-  for (let page = 1; page < totalPages; page += PARALLEL) {
-    const offsets = Array.from(
-      { length: Math.min(PARALLEL, totalPages - page) },
-      (_, i) => (page + i) * LIMIT,
-    );
-    const pages = await Promise.all(
-      offsets.map((offset) =>
-        get<BsalePage<BsaleStockRecord>>(`/stocks.json?${buildQs(offset)}`, token)
-          .then((p) => p.items ?? [])
+  while (true) {
+    const offsets = Array.from({ length: PARALLEL }, (_, i) => offset + i * LIMIT);
+    const results = await Promise.all(
+      offsets.map((off) =>
+        get<BsalePage<BsaleStockRecord>>(`/stocks.json?${buildQs(off)}`, token)
+          .then((p) => {
+            if (pageIndex === 0 && off === 0) bsaleCountField = p.count ?? 0;
+            return p.items ?? [];
+          })
           .catch(() => [] as BsaleStockRecord[]),
       ),
     );
-    for (const items of pages) addItems(items);
 
-    if (page % 50 === 1) {
-      console.log(`[stock-sync] fetched up to page ${page + PARALLEL - 1}/${totalPages}`);
+    let done = false;
+    for (const items of results) {
+      if (items.length === 0) { done = true; break; }
+      addItems(items);
+      offset += items.length;
+      pageIndex++;
+      if (items.length < LIMIT) { done = true; break; }
     }
+
+    // Progress every 10 batches (every 500 records)
+    if (pageIndex > 0 && pageIndex % (PARALLEL * 2) === 0) {
+      console.log(`[stock-sync] bsale-fetch  pages=${pageIndex}  records=${offset}  variants=${byVariantId.size}  elapsed=${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    }
+
+    if (done) break;
   }
 
-  console.log(`[stock-sync] Bsale index: ${byVariantId.size} variants, ${byCode.size} with code`);
-  return { byVariantId, byCode };
+  const elapsedS = ((Date.now() - t0) / 1000).toFixed(1);
+  const capped   = bsaleCountField > 0 && offset > bsaleCountField;
+  console.log(
+    `[stock-sync] bsale-fetch DONE  pages=${pageIndex}  records=${offset}  variants=${byVariantId.size}  with_code=${byCode.size}  bsale_count_field=${bsaleCountField}${capped ? " ⚠ COUNT_CAPPED" : ""}  elapsed=${elapsedS}s`,
+  );
+
+  return { byVariantId, byCode, pagesTotal: pageIndex, recordsTotal: offset, bsaleCountField };
 }
 
 // ── Sync ──────────────────────────────────────────────────────────────────────
@@ -161,8 +176,11 @@ export async function syncBsaleStockToSkuBeam(
   bsaleToken: string | null | undefined,
   officeId:   number | null = null,
 ): Promise<StockSyncResult> {
-  const token = resolveToken(bsaleToken);
-  const now   = new Date().toISOString();
+  const token   = resolveToken(bsaleToken);
+  const now     = new Date().toISOString();
+  const syncT0  = Date.now();
+
+  console.log(`[stock-sync] ▶ START  shop=${shopId}  officeId=${officeId ?? "none"}  at=${new Date().toLocaleTimeString("es-CL")}`);
 
   const empty: StockSyncResult = {
     total_bsale_sku_codes: 0, shopify_matched: 0, skipped: 0,
@@ -170,6 +188,7 @@ export async function syncBsaleStockToSkuBeam(
   };
 
   // 1. All Shopify-published SKUs (limit 10000 — Supabase default cap is 1000)
+  const t1 = Date.now();
   const { data: skuRows, error: skuErr } = await supabaseAdmin
     .from("skus")
     .select("id, sku_code, title, bsale_variant_id, shopify_variant_id")
@@ -180,11 +199,13 @@ export async function syncBsaleStockToSkuBeam(
   if (skuErr) throw new Error(`[syncBsaleStockToSkuBeam] lookup: ${skuErr.message}`);
 
   const shopifySkus = skuRows ?? [];
-  console.log("[stock-sync] Shopify-published SKUs:", shopifySkus.length);
+  console.log(`[stock-sync] supabase-skus  count=${shopifySkus.length}  elapsed=${Date.now() - t1}ms`);
   if (shopifySkus.length === 0) return empty;
 
   // 2. Bulk fetch ALL stocks for the configured office — one paginated pass
+  const t2         = Date.now();
   const bsaleIndex = await fetchAllStocksForOffice(token, officeId);
+  console.log(`[stock-sync] bsale-phase  elapsed=${((Date.now() - t2) / 1000).toFixed(1)}s`);
 
   // 3. Match each Shopify SKU to Bsale stock (in memory, no extra API calls)
   const matched:           MatchedEntry[] = [];
@@ -234,7 +255,7 @@ export async function syncBsaleStockToSkuBeam(
     console.log(`[stock-sync] saved bsale_variant_id for ${toSaveVariantId.length} SKUs`);
   }
 
-  console.log(`[stock-sync] matched: ${matched.length} | not in Bsale: ${skippedCodes.length}`);
+  console.log(`[stock-sync] match  matched=${matched.length}  skipped=${skippedCodes.length}  new_variant_ids=${toSaveVariantId.length}`);
 
   if (matched.length === 0) {
     return { ...empty, total_bsale_sku_codes: shopifySkus.length, skipped: skippedCodes.length };
@@ -261,9 +282,8 @@ export async function syncBsaleStockToSkuBeam(
     }
   }
 
-  console.log(`[stock-sync] upserting ${rows.length} inventory_level rows`);
-
   // 5. Upsert to inventory_levels in batches of 200
+  const t5 = Date.now();
   let synced = 0;
   let errors = 0;
   const errorDetails: StockSyncErrorDetail[] = [];
@@ -290,12 +310,15 @@ export async function syncBsaleStockToSkuBeam(
     }
   }
 
+  console.log(`[stock-sync] supabase-upsert  rows=${rows.length}  synced=${synced}  errors=${errors}  elapsed=${Date.now() - t5}ms`);
+
   await refreshSkuAnalytics();
 
   // 6. Push to Shopify (beforeMap = Shopify current stock, adjust deltas)
   const beforeMap    = new Map<string, number>();
   let shopifyUpdated = 0;
   const NODES_BATCH  = 250;
+  const t6           = Date.now();
 
   try {
     const admin = await getShopifyGraphQLClient(shopId);
@@ -432,7 +455,7 @@ export async function syncBsaleStockToSkuBeam(
       }
     }
 
-    console.log(`[stock-sync] Shopify updated: ${shopifyUpdated} / ${matched.length}`);
+    console.log(`[stock-sync] shopify-push  location=${locationGid}  adjusted=${changes.length}  already_ok=${matched.length - changes.length}  shopify_updated=${shopifyUpdated}  elapsed=${((Date.now() - t6) / 1000).toFixed(1)}s`);
   } catch (err) {
     console.error("[stock-sync] Shopify push failed (sync saved to DB):", err);
   }
@@ -448,6 +471,16 @@ export async function syncBsaleStockToSkuBeam(
       if (a.changed !== b.changed) return a.changed ? -1 : 1;
       return a.sku_code.localeCompare(b.sku_code);
     });
+
+  const totalS = ((Date.now() - syncT0) / 1000).toFixed(1);
+  console.log(
+    `[stock-sync] ✓ DONE  shop=${shopId}  officeId=${officeId ?? "none"}` +
+    `  bsale_pages=${bsaleIndex.pagesTotal}  bsale_records=${bsaleIndex.recordsTotal}` +
+    `  bsale_count_field=${bsaleIndex.bsaleCountField}${bsaleIndex.recordsTotal > bsaleIndex.bsaleCountField && bsaleIndex.bsaleCountField > 0 ? " ⚠COUNT_CAPPED" : ""}` +
+    `  shopify_skus=${shopifySkus.length}  matched=${matched.length}  skipped=${skippedCodes.length}` +
+    `  supabase_synced=${synced}  shopify_updated=${shopifyUpdated}  errors=${errors}` +
+    `  total=${totalS}s`,
+  );
 
   return {
     total_bsale_sku_codes: shopifySkus.length,
