@@ -356,17 +356,16 @@ function SkippedTable({
   return (
     <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
       <s-stack direction="block" gap="small">
-        <div
-          style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
-          onClick={() => setOpen((v) => !v)}
-        >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <p style={{ ...HEADING_STYLE, color: "var(--p-color-text-caution, #b98900)" }}>
               SKUs no encontrados en Bsale
             </p>
             <s-badge tone="warning">{items.length}</s-badge>
           </div>
-          <s-button variant="tertiary">{open ? "Ocultar ▲" : "Ver listado ▼"}</s-button>
+          <s-button variant="tertiary" onClick={() => setOpen((v) => !v)}>
+            {open ? "Ocultar ▲" : "Ver listado ▼"}
+          </s-button>
         </div>
 
         {open && (
