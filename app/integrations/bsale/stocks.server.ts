@@ -122,7 +122,8 @@ async function fetchAllStocksForOffice(
   let offset    = 0;
   let pageIndex = 0;
 
-  while (true) {
+  const MAX_RECORDS = 500_000; // safety cap — avoids infinite loop if Bsale never returns empty page
+  while (offset < MAX_RECORDS) {
     const offsets = Array.from({ length: PARALLEL }, (_, i) => offset + i * LIMIT);
     const results = await Promise.all(
       offsets.map((off) =>
