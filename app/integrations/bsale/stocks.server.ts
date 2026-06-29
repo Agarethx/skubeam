@@ -188,18 +188,29 @@ export async function syncBsaleStockToSkuBeam(
     synced: 0, shopify_updated: 0, errors: 0, error_details: [], items: [], synced_at: now,
   };
 
-  // 1. All Shopify-published SKUs (limit 10000 — Supabase default cap is 1000)
-  const t1 = Date.now();
-  const { data: skuRows, error: skuErr } = await supabaseAdmin
-    .from("skus")
-    .select("id, sku_code, title, bsale_variant_id, shopify_variant_id")
-    .eq("shop_id", shopId)
-    .not("shopify_variant_id", "is", null)
-    .limit(10000);
+  // 1. All Shopify-published SKUs — paginated because Supabase server max_rows=1000
+  //    cannot be overridden with .limit(); must use .range() to read past that cap.
+  const t1         = Date.now();
+  const PAGE_SIZE  = 1000;
+  const shopifySkus: Array<{
+    id: string; sku_code: string; title: string | null;
+    bsale_variant_id: string | null; shopify_variant_id: number | null;
+  }> = [];
 
-  if (skuErr) throw new Error(`[syncBsaleStockToSkuBeam] lookup: ${skuErr.message}`);
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabaseAdmin
+      .from("skus")
+      .select("id, sku_code, title, bsale_variant_id, shopify_variant_id")
+      .eq("shop_id", shopId)
+      .not("shopify_variant_id", "is", null)
+      .range(from, from + PAGE_SIZE - 1);
 
-  const shopifySkus = skuRows ?? [];
+    if (error) throw new Error(`[syncBsaleStockToSkuBeam] lookup: ${error.message}`);
+    if (!data || data.length === 0) break;
+    shopifySkus.push(...(data as typeof shopifySkus));
+    if (data.length < PAGE_SIZE) break;
+  }
+
   console.log(`[stock-sync] supabase-skus  count=${shopifySkus.length}  elapsed=${Date.now() - t1}ms`);
   if (shopifySkus.length === 0) return empty;
 
