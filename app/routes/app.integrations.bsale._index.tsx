@@ -519,6 +519,7 @@ export default function BsaleIntegrationPage() {
   const [selectedOfficeId,     setSelectedOfficeId]     = useState<number | "">(officeId ?? "");
   const [selectedDocTypeId,    setSelectedDocTypeId]    = useState<number | "">(documentTypeId ?? "");
   const [stockDetailPage,      setStockDetailPage]      = useState(1);
+  const [stockSearch,          setStockSearch]          = useState("");
 
   // Fetchers
   const tokenFetcher   = useFetcher<{ success?: string; error?: string; tokenSaved?: boolean }>();
@@ -1020,19 +1021,43 @@ export default function BsaleIntegrationPage() {
                 <s-text color="subdued">Ejecutado: {formatDate(lastStockSyncAt)}</s-text>
               </div>
 
+              {/* Buscar un SKU específico en el resultado del último sync */}
+              <div style={{ marginBottom: 16, maxWidth: 320 }}>
+                <label style={{ display: "block" }}>
+                  <span style={LABEL_STYLE}>Buscar SKU en el último sync</span>
+                  <input
+                    type="text"
+                    value={stockSearch}
+                    onChange={(e) => { setStockSearch(e.target.value); setStockDetailPage(1); }}
+                    placeholder="Ej: DEF111"
+                    style={INPUT_STYLE}
+                  />
+                </label>
+              </div>
+
               {/* ── Detalle por SKU ── */}
-              {lastStockSync.items && lastStockSync.items.length > 0 && (
-                <StockDetailTable
-                  items={lastStockSync.items}
-                  page={stockDetailPage}
-                  onPageChange={setStockDetailPage}
-                />
-              )}
+              {lastStockSync.items && lastStockSync.items.length > 0 && (() => {
+                const filtered = stockSearch.trim()
+                  ? lastStockSync.items.filter((i) => i.sku_code.toLowerCase().includes(stockSearch.trim().toLowerCase()))
+                  : lastStockSync.items;
+                return filtered.length > 0 ? (
+                  <StockDetailTable
+                    items={filtered}
+                    page={stockDetailPage}
+                    onPageChange={setStockDetailPage}
+                  />
+                ) : (
+                  <s-banner tone="info" heading={`"${stockSearch}" no aparece en el detalle de este sync (ni actualizado ni sin cambio).`} />
+                );
+              })()}
 
               {/* SKUs no encontrados en Bsale */}
-              {(lastStockSync.skipped_items ?? []).length > 0 && (
-                <SkippedTable items={lastStockSync.skipped_items ?? []} />
-              )}
+              {(() => {
+                const skippedFiltered = (lastStockSync.skipped_items ?? []).filter(
+                  (i) => !stockSearch.trim() || i.sku_code.toLowerCase().includes(stockSearch.trim().toLowerCase()),
+                );
+                return skippedFiltered.length > 0 && <SkippedTable items={skippedFiltered} />;
+              })()}
 
               {/* Error details — Supabase write errors */}
               {lastStockSync.error_details.length > 0 && (

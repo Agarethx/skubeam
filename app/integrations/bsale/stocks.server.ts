@@ -119,6 +119,28 @@ async function fetchAllStocksForOffice(
     }
   };
 
+  // A transient failure on any single page (timeout, rate limit, 5xx) must NOT
+  // be treated as "reached the end of the list" — that used to silently truncate
+  // the whole fetch mid-catalog, so every SKU after the failing page fell into
+  // "skipped in Bsale" with zero indication anything went wrong. Retry with
+  // backoff; if a page still fails after retries, throw and fail the whole sync
+  // loudly instead of returning a quietly incomplete stock index.
+  async function getPageWithRetry(off: number, retries = 3): Promise<BsaleStockRecord[]> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const p = await get<BsalePage<BsaleStockRecord>>(`/stocks.json?${buildQs(off)}`, token);
+        if (off === 0 && bsaleCountField === 0) bsaleCountField = p.count ?? 0;
+        return p.items ?? [];
+      } catch (err) {
+        lastErr = err;
+        console.warn(`[stock-sync] bsale-fetch page offset=${off} attempt ${attempt}/${retries} failed:`, String(err));
+        if (attempt < retries) await new Promise((r) => setTimeout(r, attempt * 500));
+      }
+    }
+    throw new Error(`[stock-sync] bsale-fetch page offset=${off} failed after ${retries} attempts: ${String(lastErr)}`);
+  }
+
   // Paginate until we receive fewer items than LIMIT (= last page reached).
   // Do NOT rely on page.count — Bsale caps it at 1,000 even for larger catalogs.
   let offset    = 0;
@@ -127,16 +149,7 @@ async function fetchAllStocksForOffice(
   const MAX_RECORDS = 500_000; // safety cap — avoids infinite loop if Bsale never returns empty page
   while (offset < MAX_RECORDS) {
     const offsets = Array.from({ length: PARALLEL }, (_, i) => offset + i * LIMIT);
-    const results = await Promise.all(
-      offsets.map((off) =>
-        get<BsalePage<BsaleStockRecord>>(`/stocks.json?${buildQs(off)}`, token)
-          .then((p) => {
-            if (pageIndex === 0 && off === 0) bsaleCountField = p.count ?? 0;
-            return p.items ?? [];
-          })
-          .catch(() => [] as BsaleStockRecord[]),
-      ),
-    );
+    const results = await Promise.all(offsets.map((off) => getPageWithRetry(off)));
 
     let done = false;
     for (const items of results) {
@@ -155,10 +168,15 @@ async function fetchAllStocksForOffice(
     if (done) break;
   }
 
-  const elapsedS = ((Date.now() - t0) / 1000).toFixed(1);
-  const capped   = bsaleCountField > 0 && offset > bsaleCountField;
+  const elapsedS   = ((Date.now() - t0) / 1000).toFixed(1);
+  const capped     = bsaleCountField > 0 && offset > bsaleCountField;
+  // Bsale's own `count` field said there should be more records than we actually
+  // received before hitting a natural end-of-list (short page) — a handful off is
+  // normal (catalog changing mid-fetch), but a big gap means data was dropped.
+  const undercount = bsaleCountField > 0 && offset < bsaleCountField * 0.98;
   console.log(
-    `[stock-sync] bsale-fetch DONE  pages=${pageIndex}  records=${offset}  variants=${byVariantId.size}  with_code=${byCode.size}  bsale_count_field=${bsaleCountField}${capped ? " ⚠ COUNT_CAPPED" : ""}  elapsed=${elapsedS}s`,
+    `[stock-sync] bsale-fetch DONE  pages=${pageIndex}  records=${offset}  variants=${byVariantId.size}  with_code=${byCode.size}  bsale_count_field=${bsaleCountField}` +
+    `${capped ? " ⚠ COUNT_CAPPED" : ""}${undercount ? ` ⚠ UNDERCOUNT (expected ~${bsaleCountField}, got ${offset})` : ""}  elapsed=${elapsedS}s`,
   );
 
   return { byVariantId, byCode, pagesTotal: pageIndex, recordsTotal: offset, bsaleCountField };
