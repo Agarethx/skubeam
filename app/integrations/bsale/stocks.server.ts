@@ -38,6 +38,7 @@ export interface StockSyncResult {
   error_details:         StockSyncErrorDetail[];
   skipped_items:         Array<{ sku_code: string; title: string | null }>;
   items:                 StockSyncItemDetail[];
+  shopify_push_errors:   StockSyncErrorDetail[];
   synced_at:             string;
 }
 
@@ -186,7 +187,8 @@ export async function syncBsaleStockToSkuBeam(
 
   const empty: StockSyncResult = {
     total_bsale_sku_codes: 0, shopify_matched: 0, skipped: 0,
-    synced: 0, shopify_updated: 0, errors: 0, error_details: [], skipped_items: [], items: [], synced_at: now,
+    synced: 0, shopify_updated: 0, errors: 0, error_details: [], skipped_items: [], items: [],
+    shopify_push_errors: [], synced_at: now,
   };
 
   // 1. All Shopify-published SKUs — paginated because Supabase server max_rows=1000
@@ -328,10 +330,11 @@ export async function syncBsaleStockToSkuBeam(
   await refreshSkuAnalytics();
 
   // 6. Push to Shopify (beforeMap = Shopify current stock, adjust deltas)
-  const beforeMap    = new Map<string, number>();
-  let shopifyUpdated = 0;
-  const NODES_BATCH  = 250;
-  const t6           = Date.now();
+  const beforeMap        = new Map<string, number>();
+  let shopifyUpdated     = 0;
+  const shopifyPushErrors: StockSyncErrorDetail[] = [];
+  const NODES_BATCH      = 250;
+  const t6                = Date.now();
 
   try {
     const admin = await getShopifyGraphQLClient(shopId);
@@ -431,7 +434,8 @@ export async function syncBsaleStockToSkuBeam(
     console.log(`[stock-sync] Shopify beforeMap built for ${beforeMap.size} SKUs`);
 
     // Compute deltas and adjust (inventoryAdjustQuantities — proven pattern)
-    const changes: Array<{ inventoryItemId: string; locationId: string; delta: number }> = [];
+    interface ChangeItem { entry: MatchedEntry; inventoryItemId: string; locationId: string; delta: number }
+    const changes: ChangeItem[] = [];
     for (const entry of matched) {
       if (entry.shopifyVariantId == null) continue;
       const itemGid    = itemMap.get(entry.shopifyVariantId);
@@ -440,35 +444,97 @@ export async function syncBsaleStockToSkuBeam(
       const bsaleQty   = afterMap.get(entry.skuId) ?? 0;
       const delta      = bsaleQty - shopifyQty;
       if (delta === 0) { shopifyUpdated++; continue; }
-      changes.push({ inventoryItemId: itemGid, locationId: locationGid, delta });
+      changes.push({ entry, inventoryItemId: itemGid, locationId: locationGid, delta });
     }
 
     console.log(`[stock-sync] Shopify: ${changes.length} adjustments needed, ${matched.length - changes.length} already correct`);
 
-    for (let i = 0; i < changes.length; i += 100) {
-      const batch     = changes.slice(i, i + 100);
-      const adjustRes = await admin.graphql(
+    // inventoryAdjustQuantities validates the WHOLE batch atomically: a single bad
+    // item (most commonly ITEM_NOT_STOCKED_AT_LOCATION — a variant that was never
+    // activated at the location the app writes to) rejects every change in that
+    // call, silently leaving up to 99 unrelated, perfectly valid SKUs un-updated.
+    // pushChanges bisects on failure to isolate the bad item(s) instead of losing
+    // the whole batch, and auto-activates + retries ITEM_NOT_STOCKED_AT_LOCATION.
+    const ADJUST_MUTATION = `#graphql
+      mutation AdjustInventory($input: InventoryAdjustQuantitiesInput!) {
+        inventoryAdjustQuantities(input: $input) {
+          userErrors { field message code }
+          inventoryAdjustmentGroup { createdAt }
+        }
+      }`;
+
+    const runAdjust = async (items: ChangeItem[]) => {
+      const res = await admin.graphql(ADJUST_MUTATION, {
+        variables: {
+          input: {
+            reason:  "correction",
+            name:    "available",
+            changes: items.map(({ inventoryItemId, locationId, delta }) => ({ inventoryItemId, locationId, delta })),
+          },
+        },
+      });
+      const json = await res.json() as {
+        data?: { inventoryAdjustQuantities?: { userErrors: Array<{ field: string; message: string; code: string }> } };
+      };
+      return json.data?.inventoryAdjustQuantities?.userErrors ?? [];
+    };
+
+    const activateItem = async (inventoryItemId: string, locationId: string): Promise<boolean> => {
+      const res = await admin.graphql(
         `#graphql
-        mutation AdjustInventory($input: InventoryAdjustQuantitiesInput!) {
-          inventoryAdjustQuantities(input: $input) {
+        mutation ActivateInventoryItem($inventoryItemId: ID!, $locationId: ID!) {
+          inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) {
+            inventoryLevel { id }
             userErrors { field message }
-            inventoryAdjustmentGroup { createdAt }
           }
         }`,
-        { variables: { input: { reason: "correction", name: "available", changes: batch } } },
+        { variables: { inventoryItemId, locationId } },
       );
-      const adjustJson = await adjustRes.json() as {
-        data?: { inventoryAdjustQuantities?: { userErrors: Array<{ field: string; message: string }> } };
+      const json = await res.json() as {
+        data?: { inventoryActivate?: { inventoryLevel?: { id: string } | null; userErrors: Array<{ message: string }> } };
       };
-      const errs = adjustJson.data?.inventoryAdjustQuantities?.userErrors ?? [];
-      if (errs.length > 0) {
-        console.error("[stock-sync] inventoryAdjustQuantities errors:", JSON.stringify(errs));
-      } else {
-        shopifyUpdated += batch.length;
+      return !!json.data?.inventoryActivate?.inventoryLevel;
+    };
+
+    const pushChanges = async (items: ChangeItem[]): Promise<void> => {
+      if (items.length === 0) return;
+      const errs = await runAdjust(items);
+
+      if (errs.length === 0) {
+        shopifyUpdated += items.length;
+        return;
       }
+
+      if (items.length === 1) {
+        const item = items[0];
+        const needsActivation = errs.some((e) => e.code === "ITEM_NOT_STOCKED_AT_LOCATION");
+        if (needsActivation && (await activateItem(item.inventoryItemId, item.locationId))) {
+          const retryErrs = await runAdjust([item]);
+          if (retryErrs.length === 0) { shopifyUpdated++; return; }
+          console.error(`[stock-sync] push retry after activation still failed for ${item.entry.skuCode}:`, JSON.stringify(retryErrs));
+          shopifyPushErrors.push({ sku_code: item.entry.skuCode, title: item.entry.title, error: retryErrs.map((e) => e.message).join("; ") });
+          return;
+        }
+        console.error(`[stock-sync] push failed for ${item.entry.skuCode}:`, JSON.stringify(errs));
+        shopifyPushErrors.push({ sku_code: item.entry.skuCode, title: item.entry.title, error: errs.map((e) => e.message).join("; ") });
+        return;
+      }
+
+      // Bisect to isolate the bad item(s) instead of dropping the whole batch.
+      const mid = Math.ceil(items.length / 2);
+      await pushChanges(items.slice(0, mid));
+      await pushChanges(items.slice(mid));
+    };
+
+    for (let i = 0; i < changes.length; i += 100) {
+      await pushChanges(changes.slice(i, i + 100));
     }
 
-    console.log(`[stock-sync] shopify-push  location=${locationGid}  adjusted=${changes.length}  already_ok=${matched.length - changes.length}  shopify_updated=${shopifyUpdated}  elapsed=${((Date.now() - t6) / 1000).toFixed(1)}s`);
+    if (shopifyPushErrors.length > 0) {
+      console.error(`[stock-sync] ${shopifyPushErrors.length} SKUs failed to push to Shopify:`, shopifyPushErrors.map((e) => e.sku_code).join(", "));
+    }
+
+    console.log(`[stock-sync] shopify-push  location=${locationGid}  adjusted=${changes.length}  already_ok=${matched.length - changes.length}  shopify_updated=${shopifyUpdated}  push_errors=${shopifyPushErrors.length}  elapsed=${((Date.now() - t6) / 1000).toFixed(1)}s`);
   } catch (err) {
     console.error("[stock-sync] Shopify push failed (sync saved to DB):", err);
   }
@@ -505,6 +571,7 @@ export async function syncBsaleStockToSkuBeam(
     error_details:         errorDetails,
     skipped_items:         skippedItems,
     items,
+    shopify_push_errors:   shopifyPushErrors,
     synced_at:             now,
   };
 }

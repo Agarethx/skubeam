@@ -1001,6 +1001,7 @@ export default function BsaleIntegrationPage() {
                     { label: "No en Bsale",        value: lastStockSync.skipped,               tone: lastStockSync.skipped > 0 ? "warning" as const : undefined },
                     { label: "Sync Shopify",       value: lastStockSync.shopify_updated ?? 0,  tone: (lastStockSync.shopify_updated ?? 0) > 0 ? "success" as const : undefined },
                     { label: "Con error",          value: lastStockSync.errors,                tone: lastStockSync.errors > 0 ? "critical" as const : undefined },
+                    { label: "Error en Shopify",   value: (lastStockSync.shopify_push_errors ?? []).length, tone: (lastStockSync.shopify_push_errors ?? []).length > 0 ? "critical" as const : undefined },
                   ] as Array<{ label: string; value: number; tone?: "success" | "warning" | "critical" }>
                 ).map(({ label, value, tone }) => (
                   <s-box key={label} padding="base" borderWidth="small" borderRadius="base" background="base">
@@ -1033,7 +1034,7 @@ export default function BsaleIntegrationPage() {
                 <SkippedTable items={lastStockSync.skipped_items ?? []} />
               )}
 
-              {/* Error details */}
+              {/* Error details — Supabase write errors */}
               {lastStockSync.error_details.length > 0 && (
                 <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
                   <s-stack direction="block" gap="small">
@@ -1043,6 +1044,29 @@ export default function BsaleIntegrationPage() {
                     <SimpleTable
                       cols={["SKU", "Título", "Error"]}
                       rows={lastStockSync.error_details.map((d) => [
+                        <span key="sku"   style={{ fontFamily: "monospace", fontWeight: 600 }}>{d.sku_code}</span>,
+                        d.title ?? "—",
+                        <span key="error" style={{ color: "var(--p-color-text-critical, #d72c0d)", fontSize: "var(--p-font-size-300, 0.75rem)" }}>{d.error}</span>,
+                      ])}
+                    />
+                  </s-stack>
+                </s-box>
+              )}
+
+              {/* Shopify push errors — matched + saved in SkuBeam, but the Shopify update itself failed */}
+              {(lastStockSync.shopify_push_errors ?? []).length > 0 && (
+                <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+                  <s-stack direction="block" gap="small">
+                    <p style={{ ...HEADING_STYLE, color: "var(--p-color-text-critical, #d72c0d)" }}>
+                      SKUs no actualizados en Shopify ({lastStockSync.shopify_push_errors.length})
+                    </p>
+                    <s-text color="subdued">
+                      El stock de Bsale para estos SKUs sí se guardó en SkuBeam, pero Shopify rechazó el ajuste de inventario.
+                      La causa más común es que el ítem nunca fue activado en la ubicación usada para el sync.
+                    </s-text>
+                    <SimpleTable
+                      cols={["SKU", "Título", "Error"]}
+                      rows={lastStockSync.shopify_push_errors.map((d) => [
                         <span key="sku"   style={{ fontFamily: "monospace", fontWeight: 600 }}>{d.sku_code}</span>,
                         d.title ?? "—",
                         <span key="error" style={{ color: "var(--p-color-text-critical, #d72c0d)", fontSize: "var(--p-font-size-300, 0.75rem)" }}>{d.error}</span>,

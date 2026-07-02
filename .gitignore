@@ -16,6 +16,9 @@ database.sqlite
 .env
 .env.*
 
+# Bsale debug dumps (scripts/debug-bsale-stock.ts)
+/debug-output/
+
 
 
 
