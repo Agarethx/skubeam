@@ -182,6 +182,97 @@ async function fetchAllStocksForOffice(
   return { byVariantId, byCode, pagesTotal: pageIndex, recordsTotal: offset, bsaleCountField };
 }
 
+// ── Reconcile Supabase skus with the live Shopify variant catalog ─────────────
+// Products published (or re-published) in Shopify since the last full product
+// sync have no row in `skus`, or a row whose shopify_variant_id is stale/null —
+// either way they're invisible to the stock-sync query below (`.not("shopify_
+// variant_id", "is", null)`), so they never even reach the Bsale matching step.
+// Pull every live variant's SKU once (cheap: ~1 page per 250 variants) and
+// backfill/relink before doing anything else.
+async function reconcileShopifyVariants(
+  shopId: string,
+  admin:  { graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+): Promise<{ live: number; upserted: number }> {
+  const t0 = Date.now();
+
+  // 1. Every live variant currently published in Shopify, by SKU.
+  const live = new Map<string, { variantId: number; skuCode: string }>(); // normalized code → {variantId, original code}
+  let cursor: string | null = null;
+  let pages = 0;
+
+  for (;;) {
+    const res = await admin.graphql(
+      `#graphql
+      query AllVariantSkus($cursor: String) {
+        productVariants(first: 250, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          edges { node { id sku } }
+        }
+      }`,
+      { variables: { cursor } },
+    );
+    const json = await res.json() as {
+      data?: {
+        productVariants?: {
+          pageInfo: { hasNextPage: boolean; endCursor: string };
+          edges: Array<{ node: { id: string; sku: string | null } }>;
+        };
+      };
+    };
+    const conn = json.data?.productVariants;
+    for (const edge of conn?.edges ?? []) {
+      const skuCode = edge.node.sku?.trim();
+      if (!skuCode) continue;
+      const variantId = parseInt(edge.node.id.split("/").pop()!, 10);
+      live.set(skuCode.toUpperCase(), { variantId, skuCode });
+    }
+    pages++;
+    if (!conn?.pageInfo.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor;
+  }
+
+  console.log(`[stock-sync] reconcile: ${live.size} live Shopify variant SKUs across ${pages} pages  elapsed=${Date.now() - t0}ms`);
+
+  // 2. What Supabase already knows for this shop (paginated past the 1000-row cap).
+  const PAGE_SIZE = 1000;
+  const existingMap = new Map<string, number | null>(); // normalized code → shopify_variant_id on file
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabaseAdmin
+      .from("skus")
+      .select("sku_code, shopify_variant_id")
+      .eq("shop_id", shopId)
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw new Error(`[reconcileShopifyVariants] lookup: ${error.message}`);
+    if (!data || data.length === 0) break;
+    for (const row of data) existingMap.set(row.sku_code.trim().toUpperCase(), row.shopify_variant_id);
+    if (data.length < PAGE_SIZE) break;
+  }
+
+  // 3. Backfill missing rows + relink stale/null shopify_variant_id — nothing else
+  //    is touched (no `status`, no `title`) so this never clobbers merchant edits.
+  const toUpsert: Array<{ shop_id: string; sku_code: string; shopify_variant_id: number }> = [];
+  for (const [normCode, entry] of live.entries()) {
+    if (existingMap.get(normCode) === entry.variantId) continue;
+    toUpsert.push({ shop_id: shopId, sku_code: entry.skuCode, shopify_variant_id: entry.variantId });
+  }
+
+  let upserted = 0;
+  for (let i = 0; i < toUpsert.length; i += 200) {
+    const batch = toUpsert.slice(i, i + 200);
+    const { error } = await supabaseAdmin
+      .from("skus")
+      .upsert(batch, { onConflict: "shop_id,sku_code" });
+    if (error) {
+      console.error(`[stock-sync] reconcile upsert batch ${i} failed:`, error.message);
+    } else {
+      upserted += batch.length;
+    }
+  }
+
+  console.log(`[stock-sync] reconcile: linked ${upserted}/${toUpsert.length} new/stale sku↔variant rows`);
+  return { live: live.size, upserted };
+}
+
 // ── Sync ──────────────────────────────────────────────────────────────────────
 
 type MatchedEntry = {
@@ -208,6 +299,16 @@ export async function syncBsaleStockToSkuBeam(
     synced: 0, shopify_updated: 0, errors: 0, error_details: [], skipped_items: [], items: [],
     shopify_push_errors: [], synced_at: now,
   };
+
+  // 0. Reconcile with Shopify's live variant catalog before matching against
+  //    Bsale — non-fatal: if Shopify is unreachable here, fall back to whatever
+  //    Supabase already has (same behavior as before this step existed).
+  try {
+    const admin = await getShopifyGraphQLClient(shopId);
+    await reconcileShopifyVariants(shopId, admin);
+  } catch (err) {
+    console.error("[stock-sync] reconcile step failed (continuing with existing Supabase data):", err);
+  }
 
   // 1. All Shopify-published SKUs — paginated because Supabase server max_rows=1000
   //    cannot be overridden with .limit(); must use .range() to read past that cap.

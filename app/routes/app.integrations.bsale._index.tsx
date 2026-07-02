@@ -997,8 +997,8 @@ export default function BsaleIntegrationPage() {
               <s-grid gridTemplateColumns="repeat(auto-fit, minmax(140px, 1fr))" gap="base">
                 {(
                   [
-                    { label: "En Bsale",          value: lastStockSync.total_bsale_sku_codes, tone: undefined },
-                    { label: "En Shopify",         value: lastStockSync.shopify_matched,       tone: "success" as const },
+                    { label: "SKUs en SkuBeam",    value: lastStockSync.total_bsale_sku_codes, tone: undefined },
+                    { label: "Matcheados con Bsale", value: lastStockSync.shopify_matched,     tone: "success" as const },
                     { label: "No en Bsale",        value: lastStockSync.skipped,               tone: lastStockSync.skipped > 0 ? "warning" as const : undefined },
                     { label: "Sync Shopify",       value: lastStockSync.shopify_updated ?? 0,  tone: (lastStockSync.shopify_updated ?? 0) > 0 ? "success" as const : undefined },
                     { label: "Con error",          value: lastStockSync.errors,                tone: lastStockSync.errors > 0 ? "critical" as const : undefined },
