@@ -383,6 +383,68 @@ export async function syncBsaleStockToSkuBeam(
 
     console.log(`[stock-sync] resolved inventoryItemId for ${itemMap.size} variants`);
 
+    // Self-heal: some skus.shopify_variant_id values are stale — the variant was
+    // deleted and recreated in Shopify (product re-import, merge, etc.), so the
+    // GID on file 404s in the nodes() lookup above and silently drops out of
+    // itemMap. Without this, those SKUs are matched against Bsale correctly but
+    // never reach Shopify at all — no error, no push, stock just stays frozen.
+    // Re-resolve by SKU code (source of truth in Shopify) and re-link the row.
+    const unresolved = matched.filter(
+      (e) => e.shopifyVariantId != null && !itemMap.has(e.shopifyVariantId),
+    );
+    const variantMissing: StockSyncErrorDetail[] = [];
+
+    if (unresolved.length > 0) {
+      console.log(`[stock-sync] ${unresolved.length} matched SKUs have a stale shopify_variant_id — re-resolving by SKU code…`);
+      const HEAL_CONCURRENCY = 10;
+      for (let i = 0; i < unresolved.length; i += HEAL_CONCURRENCY) {
+        const batch = unresolved.slice(i, i + HEAL_CONCURRENCY);
+        await Promise.all(batch.map(async (entry) => {
+          try {
+            const res = await admin.graphql(
+              `#graphql
+              query FindVariantBySku($query: String!) {
+                productVariants(first: 1, query: $query) {
+                  edges { node { id sku inventoryItem { id } } }
+                }
+              }`,
+              { variables: { query: `sku:${JSON.stringify(entry.skuCode)}` } },
+            );
+            const json = await res.json() as {
+              data?: { productVariants?: { edges: Array<{ node: { id: string; sku: string; inventoryItem?: { id: string } } }> } };
+            };
+            const node = json.data?.productVariants?.edges[0]?.node;
+            if (!node?.inventoryItem?.id) {
+              variantMissing.push({
+                sku_code: entry.skuCode,
+                title:    entry.title,
+                error:    "El SKU ya no existe como variante en Shopify (posible producto eliminado/recreado). Vuelve a sincronizar productos para re-vincularlo.",
+              });
+              return;
+            }
+            const newVariantId = parseInt(node.id.split("/").pop()!, 10);
+            // Map the OLD (stale) id used throughout `matched`/`entry` to the
+            // freshly resolved inventoryItemId so downstream logic needs no changes.
+            itemMap.set(entry.shopifyVariantId!, node.inventoryItem.id);
+            const { error } = await supabaseAdmin
+              .from("skus")
+              .update({ shopify_variant_id: newVariantId })
+              .eq("id", entry.skuId);
+            if (error) {
+              console.error(`[stock-sync] re-link shopify_variant_id failed for ${entry.skuCode}:`, error.message);
+            } else {
+              console.log(`[stock-sync] re-linked ${entry.skuCode}: shopify_variant_id ${entry.shopifyVariantId} → ${newVariantId}`);
+            }
+          } catch (err) {
+            console.error(`[stock-sync] re-resolve by SKU failed for ${entry.skuCode}:`, err);
+            variantMissing.push({ sku_code: entry.skuCode, title: entry.title, error: String(err) });
+          }
+        }));
+      }
+      console.log(`[stock-sync] re-resolved ${unresolved.length - variantMissing.length}/${unresolved.length} stale variants  (still missing: ${variantMissing.length})`);
+      shopifyPushErrors.push(...variantMissing);
+    }
+
     // Query current Shopify quantities for beforeMap (batched in 250)
     const inventoryItemGids = [...new Set(itemMap.values())];
     const allQtyNodes: Array<{
