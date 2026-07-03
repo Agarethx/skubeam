@@ -241,6 +241,7 @@ async function reconcileShopifyVariants(
       .from("skus")
       .select("sku_code, shopify_variant_id")
       .eq("shop_id", shopId)
+      .order("id", { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
     if (error) throw new Error(`[reconcileShopifyVariants] lookup: ${error.message}`);
     if (!data || data.length === 0) break;
@@ -325,6 +326,7 @@ export async function syncBsaleStockToSkuBeam(
       .select("id, sku_code, title, bsale_variant_id, shopify_variant_id")
       .eq("shop_id", shopId)
       .not("shopify_variant_id", "is", null)
+      .order("id", { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
 
     if (error) throw new Error(`[syncBsaleStockToSkuBeam] lookup: ${error.message}`);

@@ -30,6 +30,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       .from("skus")
       .select("id, sku_code")
       .eq("shop_id", shopId)
+      .order("id", { ascending: true })
       .range(skuOffset, skuOffset + SKU_PAGE - 1);
 
     if (skusError) {
