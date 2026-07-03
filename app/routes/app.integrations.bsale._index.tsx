@@ -21,6 +21,15 @@ import {
   type BsaleOfficeOption,
   type BsaleDocumentTypeOption,
 } from "../integrations/bsale/client.server";
+import {
+  getActiveSyncJobByType,
+  getLastCompletedSyncJob,
+  startBulkSync,
+} from "../models/sync.server";
+import type { ProductSyncSummary } from "../models/sync.server";
+import type { Tables } from "../types/supabase";
+
+type SyncJob = Tables<"sync_jobs">;
 
 // ── Loader ────────────────────────────────────────────────────────────────────
 
@@ -28,7 +37,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopId = session.shop;
 
-  const [shopRow, activeJob, recentBoletas, lastStockJob] = await Promise.all([
+  const [shopRow, activeJob, recentBoletas, lastStockJob, activeProductSyncJob, lastProductSyncJob] = await Promise.all([
     supabaseAdmin
       .from("shops")
       .select("bsale_token, bsale_last_sync, active_addons, bsale_price_list_id, bsale_office_id, bsale_document_type_id, bsale_document_code_sii")
@@ -53,6 +62,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .limit(1)
       .maybeSingle()
       .then(({ data }) => data),
+    getActiveSyncJobByType(shopId, "full_product_sync"),
+    getLastCompletedSyncJob(shopId, "full_product_sync"),
   ]);
 
   const hasToken     = !!shopRow?.bsale_token;
@@ -90,17 +101,34 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     documentTypes,
     lastStockSync:  lastStockJob?.payload as StockSyncPayload | null ?? null,
     lastStockSyncAt: lastStockJob?.completed_at ?? null,
+    activeProductSyncJob: activeProductSyncJob as SyncJob | null,
+    lastProductSync: lastProductSyncJob
+      ? {
+          completedAt:      lastProductSyncJob.completed_at,
+          recordsProcessed: lastProductSyncJob.records_processed ?? 0,
+          summary: (lastProductSyncJob.payload as ProductSyncSummary | null) ?? null,
+        }
+      : null,
   };
 };
 
 // ── Action ────────────────────────────────────────────────────────────────────
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const shopId = session.shop;
 
   const formData = await request.formData();
   const intent   = formData.get("intent") as string;
+
+  if (intent === "sync_shopify_products") {
+    try {
+      const job = await startBulkSync(admin, shopId);
+      return { jobId: job.id, jobType: "full_product_sync" as const };
+    } catch (err) {
+      return { error: `No se pudo iniciar la sincronización con Shopify: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
 
   if (intent === "save_token") {
     const token = ((formData.get("bsale_token") as string | null) ?? "").trim();
@@ -226,8 +254,8 @@ function formatDate(iso: string | null) {
 }
 
 function jobTypeLabel(type: string | null | undefined) {
-  if (type === "bsale_products") return "productos";
-  if (type === "bsale_stock")    return "stock";
+  if (type === "bsale_products") return "precios (Bsale)";
+  if (type === "bsale_stock")    return "stock (Bsale)";
   return "datos";
 }
 
@@ -495,6 +523,74 @@ function StockDetailTable({
   );
 }
 
+// ── Product-sync issue tables (duplicados / sin SKU / otros errores) ─────────
+
+type SkuSyncIssue = {
+  shopify_variant_id: number;
+  product_title: string;
+  variant_title: string | null;
+  sku_code?: string;
+  reason: "no_sku" | "duplicate_sku" | "other_error";
+  detail?: string;
+  conflicts_with_title?: string;
+};
+
+function ProductSyncIssuesTable({
+  heading,
+  helpText,
+  tone,
+  items,
+  cols,
+  rowOf,
+}: {
+  heading:  string;
+  helpText: string;
+  tone:     "warning" | "critical";
+  items:    SkuSyncIssue[];
+  cols:     string[];
+  rowOf:    (item: SkuSyncIssue) => React.ReactNode[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [page, setPage] = useState(1);
+  const totalPages       = Math.ceil(items.length / PAGE_SIZE_SKIPPED);
+  const slice            = items.slice((page - 1) * PAGE_SIZE_SKIPPED, page * PAGE_SIZE_SKIPPED);
+  const color = tone === "critical" ? "var(--p-color-text-critical, #d72c0d)" : "var(--p-color-text-caution, #b98900)";
+
+  return (
+    <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+      <s-stack direction="block" gap="small">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <p style={{ ...HEADING_STYLE, color }}>{heading}</p>
+            <s-badge tone={tone}>{items.length}</s-badge>
+          </div>
+          <s-button variant="tertiary" onClick={() => setOpen((v) => !v)}>
+            {open ? "Ocultar ▲" : "Ver listado ▼"}
+          </s-button>
+        </div>
+
+        {open && (
+          <>
+            <s-text color="subdued">{helpText}</s-text>
+            <SimpleTable cols={cols} rows={slice.map(rowOf)} />
+            {totalPages > 1 && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 8 }}>
+                <s-text color="subdued">
+                  {(page - 1) * PAGE_SIZE_SKIPPED + 1}–{Math.min(page * PAGE_SIZE_SKIPPED, items.length)} de {items.length}
+                </s-text>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <s-button variant="tertiary" {...(page <= 1 ? { disabled: true } : {})} onClick={() => setPage(page - 1)}>← Anterior</s-button>
+                  <s-button variant="tertiary" {...(page >= totalPages ? { disabled: true } : {})} onClick={() => setPage(page + 1)}>Siguiente →</s-button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </s-stack>
+    </s-box>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function BsaleIntegrationPage() {
@@ -504,6 +600,7 @@ export default function BsaleIntegrationPage() {
     bsaleLastSync, activeJob, hasAddon, recentBoletas,
     priceLists, offices, documentTypes,
     lastStockSync, lastStockSyncAt,
+    activeProductSyncJob, lastProductSync,
   } = useLoaderData<typeof loader>();
 
   const revalidator = useRevalidator();
@@ -572,6 +669,46 @@ export default function BsaleIntegrationPage() {
     }
   }, [polledStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Shopify product sync (bulk operation) — separate poll target: /api/sync
+  // advances Shopify's own async bulk op, unlike the jobId-based Bsale polling above.
+  const productSyncFetcher     = useFetcher<{ jobId?: string; jobType?: "full_product_sync"; error?: string }>();
+  const productSyncPollFetcher = useFetcher<{ job: SyncJob | null }>();
+  const productSyncPollRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // trackedJobId is the only source of truth for "we just kicked off a sync and
+  // haven't yet confirmed it finished" — it's explicitly cleared on a terminal
+  // status so the spinner can't get stuck forever (fetcher.data persists across
+  // revalidations, so ORing against it directly never turns back false).
+  const [trackedJobId, setTrackedJobId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (productSyncFetcher.data?.jobId) setTrackedJobId(productSyncFetcher.data.jobId);
+  }, [productSyncFetcher.data]);
+
+  const polledProductSyncJob = productSyncPollFetcher.data?.job ?? (trackedJobId ? null : activeProductSyncJob);
+  const isProductSyncRunning = trackedJobId
+    ? !polledProductSyncJob || polledProductSyncJob.status === "running" || polledProductSyncJob.status === "pending"
+    : !!activeProductSyncJob && (activeProductSyncJob.status === "running" || activeProductSyncJob.status === "pending");
+
+  useEffect(() => {
+    if (!isProductSyncRunning) return;
+    productSyncPollRef.current = setInterval(() => productSyncPollFetcher.load("/api/sync"), 5000);
+    return () => { if (productSyncPollRef.current) { clearInterval(productSyncPollRef.current); productSyncPollRef.current = null; } };
+  }, [isProductSyncRunning]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const s = productSyncPollFetcher.data?.job?.status;
+    if (s === "completed" || s === "failed" || s === "cancelled") {
+      if (productSyncPollRef.current) { clearInterval(productSyncPollRef.current); productSyncPollRef.current = null; }
+      setTrackedJobId(null);
+      revalidator.revalidate();
+    }
+  }, [productSyncPollFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const productSyncProgress = polledProductSyncJob?.records_processed
+    ? ` (${polledProductSyncJob.records_processed} procesados)`
+    : "";
+
   const isSavingToken = tokenFetcher.state !== "idle";
   const isSavingSetup = setupFetcher.state !== "idle";
 
@@ -579,7 +716,11 @@ export default function BsaleIntegrationPage() {
     tokenFetcher.data?.error ??
     webhookFetcher.data?.error ??
     createFetcher.data?.error ??
-    (polledStatus === "failed" ? "La sincronización falló. Revisa los logs." : null);
+    productSyncFetcher.data?.error ??
+    (polledStatus === "failed" ? "La sincronización falló. Revisa los logs." : null) ??
+    (polledProductSyncJob?.status === "failed"
+      ? `Sincronización de productos Shopify falló: ${polledProductSyncJob.error_message ?? "error desconocido"}`
+      : null);
 
   const successMsg =
     tokenFetcher.data?.success ??
@@ -945,8 +1086,37 @@ export default function BsaleIntegrationPage() {
                     </s-banner>
                   )}
 
+                  {isProductSyncRunning && (
+                    <s-banner tone="info">
+                      <s-stack direction="inline" gap="small">
+                        <s-spinner />
+                        <s-text>Sincronizando catálogo desde Shopify{productSyncProgress}… puede tardar varios minutos.</s-text>
+                      </s-stack>
+                    </s-banner>
+                  )}
+
                   <s-stack direction="block" gap="small">
-                    <s-text type="strong">Productos</s-text>
+                    <s-text type="strong">Productos (Shopify)</s-text>
+                    <s-text color="subdued">
+                      Trae el catálogo completo desde Shopify — SKU, título, vendor, costo. Ejecuta esto primero:
+                      el conteo de SkuBeam debe cuadrar con el total de variantes de Shopify antes de sincronizar precios/stock con Bsale.
+                    </s-text>
+                    <productSyncFetcher.Form method="post">
+                      <input type="hidden" name="intent" value="sync_shopify_products" />
+                      <s-button
+                        type="submit"
+                        variant="primary"
+                        {...(isProductSyncRunning || productSyncFetcher.state !== "idle" ? { loading: true, disabled: true } : {})}
+                      >
+                        Sincronizar productos
+                      </s-button>
+                    </productSyncFetcher.Form>
+                  </s-stack>
+
+                  <div style={{ height: "1px", background: "var(--p-color-border, #e1e3e5)" }} />
+
+                  <s-stack direction="block" gap="small">
+                    <s-text type="strong">Precios (Bsale)</s-text>
                     <s-text color="subdued">Importa el catálogo de variantes desde Bsale con precios de la lista configurada.</s-text>
                     <s-stack direction="inline" gap="small">
                       <createFetcher.Form method="post">
@@ -956,7 +1126,7 @@ export default function BsaleIntegrationPage() {
                           {...(isRunning || createFetcher.state !== "idle" ? { loading: true } : {})}
                           {...(!hasToken ? { disabled: true } : {})}
                         >
-                          Sincronizar productos
+                          Sincronizar precios
                         </s-button>
                       </createFetcher.Form>
                       {hasToken && !isRunning && (
@@ -970,7 +1140,7 @@ export default function BsaleIntegrationPage() {
                   <div style={{ height: "1px", background: "var(--p-color-border, #e1e3e5)" }} />
 
                   <s-stack direction="block" gap="small">
-                    <s-text type="strong">Stock</s-text>
+                    <s-text type="strong">Stock (Bsale)</s-text>
                     <s-text color="subdued">Actualiza los niveles de inventario por sucursal.</s-text>
                     <createFetcher.Form method="post">
                       <input type="hidden" name="intent" value="sync_stock" />
@@ -989,6 +1159,100 @@ export default function BsaleIntegrationPage() {
 
             </s-grid>
           </s-section>
+
+          {/* ── Última sincronización de productos (Shopify) ─────────────── */}
+          {lastProductSync && (() => {
+            const summary   = lastProductSync.summary;
+            const total     = summary?.records_total ?? lastProductSync.recordsProcessed;
+            const skipped   = (summary?.skipped ?? []) as SkuSyncIssue[];
+            const duplicates = skipped.filter((s) => s.reason === "duplicate_sku");
+            const noSku      = skipped.filter((s) => s.reason === "no_sku");
+            const others     = skipped.filter((s) => s.reason === "other_error");
+            const allSquare  = skipped.length === 0 && total === lastProductSync.recordsProcessed;
+
+            return (
+              <s-section heading="Última sincronización de productos (Shopify)">
+                <s-stack direction="block" gap="base">
+                  <s-grid gridTemplateColumns="repeat(auto-fit, minmax(140px, 1fr))" gap="base">
+                    {(
+                      [
+                        { label: "Variantes en Shopify", value: total, tone: undefined },
+                        { label: "Sincronizados",         value: lastProductSync.recordsProcessed, tone: "success" as const },
+                        { label: "Duplicados",            value: duplicates.length, tone: duplicates.length > 0 ? "warning" as const : undefined },
+                        { label: "Sin SKU",                value: noSku.length,      tone: noSku.length > 0 ? "warning" as const : undefined },
+                        { label: "Otros errores",         value: others.length,     tone: others.length > 0 ? "critical" as const : undefined },
+                      ] as Array<{ label: string; value: number; tone?: "success" | "warning" | "critical" }>
+                    ).map(({ label, value, tone }) => (
+                      <s-box key={label} padding="base" borderWidth="small" borderRadius="base" background="base">
+                        <s-stack direction="block" gap="small">
+                          <s-text color="subdued">{label}</s-text>
+                          {tone
+                            ? <s-badge tone={tone}>{value.toLocaleString("es-CL")}</s-badge>
+                            : <p style={{ margin: 0, fontWeight: 600, fontSize: "var(--p-font-size-500, 1.25rem)" }}>{value.toLocaleString("es-CL")}</p>
+                          }
+                        </s-stack>
+                      </s-box>
+                    ))}
+                  </s-grid>
+
+                  <s-text color="subdued">Ejecutado: {formatDate(lastProductSync.completedAt)}</s-text>
+
+                  {allSquare ? (
+                    <s-banner tone="success" heading={`Todo cuadra: ${total} de ${total} variantes de Shopify están en SkuBeam.`} />
+                  ) : (
+                    <s-banner
+                      tone="warning"
+                      heading={`${lastProductSync.recordsProcessed} de ${total} variantes sincronizadas — ${skipped.length} quedaron fuera, revisa el detalle abajo.`}
+                    />
+                  )}
+
+                  {duplicates.length > 0 && (
+                    <ProductSyncIssuesTable
+                      heading="SKUs duplicados en Shopify"
+                      tone="warning"
+                      helpText="Dos o más variantes de productos distintos comparten el mismo código SKU. SkuBeam solo puede guardar una — corrige el código duplicado en Shopify (asigna uno único a cada variante) y vuelve a sincronizar."
+                      items={duplicates}
+                      cols={["SKU", "Producto sin sincronizar", "Ya sincronizado como"]}
+                      rowOf={(item) => [
+                        <span key="sku" style={{ fontFamily: "monospace", fontWeight: 600 }}>{item.sku_code}</span>,
+                        <span key="p">{item.product_title}</span>,
+                        <span key="c" style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>{item.conflicts_with_title ?? "—"}</span>,
+                      ]}
+                    />
+                  )}
+
+                  {noSku.length > 0 && (
+                    <ProductSyncIssuesTable
+                      heading="Productos sin SKU en Shopify"
+                      tone="warning"
+                      helpText="Estas variantes existen en Shopify pero no tienen ningún código SKU asignado, así que SkuBeam no puede sincronizarlas. Asígnales un código en Shopify y vuelve a sincronizar."
+                      items={noSku}
+                      cols={["Producto", "Variante"]}
+                      rowOf={(item) => [
+                        <span key="p">{item.product_title}</span>,
+                        <span key="v" style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>{item.variant_title ?? "—"}</span>,
+                      ]}
+                    />
+                  )}
+
+                  {others.length > 0 && (
+                    <ProductSyncIssuesTable
+                      heading="Errores inesperados al guardar"
+                      tone="critical"
+                      helpText="Estas variantes tienen SKU en Shopify pero SkuBeam no pudo guardarlas por un error de base de datos. Revisa el detalle o contacta soporte si persiste."
+                      items={others}
+                      cols={["SKU", "Producto", "Error"]}
+                      rowOf={(item) => [
+                        <span key="sku" style={{ fontFamily: "monospace", fontWeight: 600 }}>{item.sku_code ?? "—"}</span>,
+                        <span key="p">{item.product_title}</span>,
+                        <span key="e" style={{ color: "var(--p-color-text-critical, #d72c0d)", fontSize: "var(--p-font-size-300, 0.75rem)" }}>{item.detail}</span>,
+                      ]}
+                    />
+                  )}
+                </s-stack>
+              </s-section>
+            );
+          })()}
 
           {/* ── Último sync de stock ─────────────────────────────────────── */}
           {lastStockSync && (

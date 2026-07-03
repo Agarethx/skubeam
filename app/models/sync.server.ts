@@ -21,6 +21,48 @@ export async function getActiveSyncJob(shopId: string) {
   return data;
 }
 
+export async function getLastCompletedSyncJob(shopId: string, type: string) {
+  const { data } = await supabaseAdmin
+    .from("sync_jobs")
+    .select("*")
+    .eq("shop_id", shopId)
+    .eq("type", type)
+    .eq("status", "completed")
+    .order("completed_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data;
+}
+
+export async function getActiveSyncJobByType(shopId: string, type: string) {
+  const { data } = await supabaseAdmin
+    .from("sync_jobs")
+    .select("*")
+    .eq("shop_id", shopId)
+    .eq("type", type)
+    .in("status", ["pending", "running"])
+    .order("started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data;
+}
+
+// Scoped to the two job types actually driven by Shopify's bulk-operations API —
+// used by checkAndAdvanceBulkSync so an unrelated active job (bulk_publish,
+// bsale_products, bsale_stock) never gets mistaken for the Shopify bulk op being polled.
+async function getActiveShopifyBulkJob(shopId: string) {
+  const { data } = await supabaseAdmin
+    .from("sync_jobs")
+    .select("*")
+    .eq("shop_id", shopId)
+    .in("type", ["full_product_sync", "orders_sync"])
+    .in("status", ["pending", "running"])
+    .order("started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return data;
+}
+
 // ── Start bulk sync ───────────────────────────────────────────────────────────
 
 const BULK_PRODUCTS_MUTATION = `#graphql
@@ -60,7 +102,7 @@ const BULK_PRODUCTS_MUTATION = `#graphql
   }`;
 
 export async function startBulkSync(admin: { graphql: (query: string) => Promise<Response> }, shopId: string) {
-  const active = await getActiveSyncJob(shopId);
+  const active = await getActiveShopifyBulkJob(shopId);
   if (active) return active;
 
   const response = await admin.graphql(BULK_PRODUCTS_MUTATION);
@@ -113,7 +155,7 @@ export async function checkAndAdvanceBulkSync(
   admin: { graphql: (query: string) => Promise<Response> },
   shopId: string,
 ) {
-  const job = await getActiveSyncJob(shopId);
+  const job = await getActiveShopifyBulkJob(shopId);
   if (!job) return null;
 
   const response = await admin.graphql(BULK_STATUS_QUERY);
@@ -175,7 +217,7 @@ export async function startOrdersSync(
   admin: { graphql: (query: string) => Promise<Response> },
   shopId: string,
 ) {
-  const active = await getActiveSyncJob(shopId);
+  const active = await getActiveShopifyBulkJob(shopId);
   if (active) return active;
 
   const since = new Date();
@@ -380,6 +422,23 @@ export async function processOrdersJsonl(
 
 // ── Process Products JSONL ─────────────────────────────────────────────────────
 
+export type SkippedProductSyncItem = {
+  shopify_variant_id: number;
+  shopify_product_id: number | null;
+  product_title: string;
+  variant_title: string | null;
+  sku_code?: string;
+  reason: "no_sku" | "duplicate_sku" | "other_error";
+  detail?: string;
+  /** For reason=duplicate_sku: the product title already holding this SKU code. */
+  conflicts_with_title?: string;
+};
+
+export type ProductSyncSummary = {
+  records_total: number;
+  skipped: SkippedProductSyncItem[];
+};
+
 export async function processBulkJsonl(
   jsonlUrl: string,
   shopId: string,
@@ -397,7 +456,21 @@ export async function processBulkJsonl(
     string,
     { title: string; vendor: string | null; productType: string | null }
   >();
-  const variants: object[] = [];
+  const variants: Array<{
+    shop_id: string;
+    shopify_variant_id: number;
+    shopify_product_id: number;
+    sku_code: string;
+    barcode: string | null;
+    title: string | null;
+    vendor: string | null;
+    product_type: string | null;
+    cost_price: number | null;
+    status: string;
+    updated_at: string;
+  }> = [];
+  const skippedItems: SkippedProductSyncItem[] = [];
+  let recordsTotal = 0;
 
   for (const line of lines) {
     const node = JSON.parse(line) as {
@@ -418,11 +491,22 @@ export async function processBulkJsonl(
         productType: node.productType ?? null,
       });
     } else {
-      if (!node.sku) continue;
-
+      recordsTotal++;
       const product = productMap.get(node.__parentId);
       const variantTitle =
         node.title && node.title !== "Default Title" ? node.title : null;
+
+      if (!node.sku) {
+        skippedItems.push({
+          shopify_variant_id: parseInt(node.id.split("/").pop()!, 10),
+          shopify_product_id: parseInt(node.__parentId.split("/").pop()!, 10),
+          product_title: product?.title ?? node.__parentId,
+          variant_title: variantTitle,
+          reason: "no_sku",
+        });
+        continue;
+      }
+
       const fullTitle = product
         ? variantTitle
           ? `${product.title} - ${variantTitle}`
@@ -447,19 +531,67 @@ export async function processBulkJsonl(
     }
   }
 
-  // Upsert in batches of 500
+  // Upsert in batches of 500 — a batch-level failure (e.g. one variant's SKU
+  // colliding with an existing row under skus_shop_sku_unique) must not silently
+  // drop the other ~499 valid rows in that batch, so retry row-by-row on error.
   let processed = 0;
   for (let i = 0; i < variants.length; i += 500) {
     const batch = variants.slice(i, i + 500);
     const { error } = await supabaseAdmin
       .from("skus")
       .upsert(batch, { onConflict: "shopify_variant_id" });
-    if (error) {
-      console.error(`processBulkJsonl batch ${i}:`, error.message);
-    } else {
+
+    if (!error) {
       processed += batch.length;
+      continue;
+    }
+
+    console.error(`processBulkJsonl batch ${i}:`, error.message);
+    for (const row of batch) {
+      const { error: rowError } = await supabaseAdmin
+        .from("skus")
+        .upsert([row], { onConflict: "shopify_variant_id" });
+
+      if (!rowError) {
+        processed++;
+        continue;
+      }
+
+      const isDuplicateSku =
+        rowError.code === "23505" && rowError.message.includes("skus_shop_sku_unique");
+
+      if (isDuplicateSku) {
+        const { data: existing } = await supabaseAdmin
+          .from("skus")
+          .select("title")
+          .eq("shop_id", shopId)
+          .eq("sku_code", row.sku_code)
+          .maybeSingle();
+
+        skippedItems.push({
+          shopify_variant_id: row.shopify_variant_id,
+          shopify_product_id: row.shopify_product_id,
+          product_title: row.title ?? row.sku_code,
+          variant_title: null,
+          sku_code: row.sku_code,
+          reason: "duplicate_sku",
+          conflicts_with_title: existing?.title ?? undefined,
+        });
+      } else {
+        skippedItems.push({
+          shopify_variant_id: row.shopify_variant_id,
+          shopify_product_id: row.shopify_product_id,
+          product_title: row.title ?? row.sku_code,
+          variant_title: null,
+          sku_code: row.sku_code,
+          reason: "other_error",
+          detail: rowError.message,
+        });
+      }
     }
   }
+
+  const summary: ProductSyncSummary = { records_total: recordsTotal, skipped: skippedItems };
 
   await supabaseAdmin
     .from("sync_jobs")
@@ -467,6 +599,7 @@ export async function processBulkJsonl(
       status: "completed",
       records_processed: processed,
       completed_at: new Date().toISOString(),
+      payload: summary,
     })
     .eq("id", jobId);
 
