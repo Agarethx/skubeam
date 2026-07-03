@@ -685,10 +685,22 @@ export default function BsaleIntegrationPage() {
     if (productSyncFetcher.data?.jobId) setTrackedJobId(productSyncFetcher.data.jobId);
   }, [productSyncFetcher.data]);
 
-  const polledProductSyncJob = productSyncPollFetcher.data?.job ?? (trackedJobId ? null : activeProductSyncJob);
-  const isProductSyncRunning = trackedJobId
-    ? !polledProductSyncJob || ["running", "pending", "processing"].includes(polledProductSyncJob.status ?? "")
-    : !!activeProductSyncJob && ["running", "pending", "processing"].includes(activeProductSyncJob.status ?? "");
+  // /api/sync returns { job: null } once nothing is active anymore — including right
+  // after OUR job just finished, since "completed" jobs are (by design) excluded from
+  // the active-job lookup. `null ?? fallback` treated that as "no info yet" and fell
+  // back to the stale activeProductSyncJob from page load, so the spinner never
+  // cleared even though the server had long since finished. A poll response having
+  // arrived at all — job or no job — is itself authoritative.
+  const pollReceived        = productSyncPollFetcher.data !== undefined;
+  const polledProductSyncJob = pollReceived
+    ? productSyncPollFetcher.data!.job
+    : (trackedJobId ? null : activeProductSyncJob);
+
+  const isProductSyncRunning = pollReceived
+    ? !!polledProductSyncJob && ["running", "pending", "processing"].includes(polledProductSyncJob.status ?? "")
+    : trackedJobId
+      ? true
+      : !!activeProductSyncJob && ["running", "pending", "processing"].includes(activeProductSyncJob.status ?? "");
 
   useEffect(() => {
     if (!isProductSyncRunning) return;
@@ -697,8 +709,10 @@ export default function BsaleIntegrationPage() {
   }, [isProductSyncRunning]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    const s = productSyncPollFetcher.data?.job?.status;
-    if (s === "completed" || s === "failed" || s === "cancelled") {
+    if (!pollReceived) return;
+    const job = productSyncPollFetcher.data!.job;
+    const isDone = !job || job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+    if (isDone) {
       if (productSyncPollRef.current) { clearInterval(productSyncPollRef.current); productSyncPollRef.current = null; }
       setTrackedJobId(null);
       revalidator.revalidate();

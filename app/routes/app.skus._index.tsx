@@ -106,12 +106,19 @@ function SyncProgressBanner({ job }: { job: SyncJob }) {
   }, [job.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (pollFetcher.data?.job?.status === "completed" || pollFetcher.data?.job?.status === "cancelled") {
+    if (pollFetcher.data === undefined) return;
+    const polled = pollFetcher.data.job;
+    // "job: null" means the active-job lookup no longer finds it — which, once we
+    // were already tracking it, only happens because it just finished (completed
+    // jobs are excluded from that lookup by design). Treat that as done too, or the
+    // banner falls back to the stale `job` prop below and never clears.
+    if (!polled || polled.status === "completed" || polled.status === "cancelled") {
       revalidate();
     }
   }, [pollFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const polledJob  = pollFetcher.data?.job ?? job;
+  const polledJob = pollFetcher.data !== undefined ? pollFetcher.data.job : job;
+  if (!polledJob) return null; // finished — parent will revalidate and unmount us
   const processed  = polledJob.records_processed ?? 0;
   const isBulk     = polledJob.type === "bulk_publish";
   const total      = isBulk ? ((polledJob.payload as { total?: number } | null)?.total ?? 0) : 0;

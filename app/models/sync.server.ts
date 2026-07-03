@@ -158,7 +158,13 @@ export async function checkAndAdvanceBulkSync(
   shopId: string,
 ) {
   const job = await getActiveShopifyBulkJob(shopId);
-  if (!job) return null;
+  if (!job) {
+    // No Shopify bulk-operation job active — but a different active job (e.g.
+    // bulk_publish, advanced by a separate worker) may still exist and the client
+    // polling this endpoint wants its fresh state. Just pass it through as-is;
+    // don't try to apply Shopify bulk-op advance logic to it.
+    return await getActiveSyncJob(shopId);
+  }
 
   const response = await admin.graphql(BULK_STATUS_QUERY);
   const json = await response.json() as {
@@ -196,10 +202,25 @@ export async function checkAndAdvanceBulkSync(
 
     if (!claimed) return job;
 
-    if (job.type === "orders_sync") {
-      await processOrdersJsonl(op.url, shopId, job.id);
-    } else {
-      await processBulkJsonl(op.url, shopId, job.id);
+    try {
+      if (job.type === "orders_sync") {
+        await processOrdersJsonl(op.url, shopId, job.id);
+      } else {
+        await processBulkJsonl(op.url, shopId, job.id);
+      }
+    } catch (err) {
+      // If ingestion throws (e.g. JSONL download fails), the job would otherwise be
+      // stuck in "processing" forever — nothing else ever moves it out of that state.
+      console.error("[checkAndAdvanceBulkSync] ingestion failed:", err);
+      await supabaseAdmin
+        .from("sync_jobs")
+        .update({
+          status: "failed",
+          error_message: err instanceof Error ? err.message : String(err),
+          completed_at: new Date().toISOString(),
+        })
+        .eq("id", job.id);
+      return { ...job, status: "failed" as const };
     }
     return { ...job, status: "completed" as const };
   }
