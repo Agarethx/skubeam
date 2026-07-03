@@ -100,7 +100,7 @@ function SyncProgressBanner({ job }: { job: SyncJob }) {
   const { revalidate } = useRevalidator();
 
   useEffect(() => {
-    if (job.status !== "running" && job.status !== "pending") return;
+    if (!["running", "pending", "processing"].includes(job.status ?? "")) return;
     const interval = setInterval(() => { pollFetcher.load("/api/sync"); }, 5000);
     return () => clearInterval(interval);
   }, [job.status]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -276,7 +276,7 @@ export default function SkusIndex() {
 
   const isSyncing =
     activeSyncJob !== null &&
-    (activeSyncJob.status === "running" || activeSyncJob.status === "pending");
+    ["running", "pending", "processing"].includes(activeSyncJob.status ?? "");
 
   // Build a filtered URL, preserving current search/status/tab params
   function pageUrl(newPage: number, s = search, st: string = status, t = tab): string {

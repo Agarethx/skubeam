@@ -14,7 +14,7 @@ export async function getActiveSyncJob(shopId: string) {
     .from("sync_jobs")
     .select("*")
     .eq("shop_id", shopId)
-    .in("status", ["pending", "running"])
+    .in("status", ["pending", "running", "processing"])
     .order("started_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -40,7 +40,7 @@ export async function getActiveSyncJobByType(shopId: string, type: string) {
     .select("*")
     .eq("shop_id", shopId)
     .eq("type", type)
-    .in("status", ["pending", "running"])
+    .in("status", ["pending", "running", "processing"])
     .order("started_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -50,13 +50,15 @@ export async function getActiveSyncJobByType(shopId: string, type: string) {
 // Scoped to the two job types actually driven by Shopify's bulk-operations API —
 // used by checkAndAdvanceBulkSync so an unrelated active job (bulk_publish,
 // bsale_products, bsale_stock) never gets mistaken for the Shopify bulk op being polled.
+// Includes "processing" (set while ingesting the JSONL) so a still-running ingest
+// doesn't look "free" and let a second bulk op get kicked off concurrently.
 async function getActiveShopifyBulkJob(shopId: string) {
   const { data } = await supabaseAdmin
     .from("sync_jobs")
     .select("*")
     .eq("shop_id", shopId)
     .in("type", ["full_product_sync", "orders_sync"])
-    .in("status", ["pending", "running"])
+    .in("status", ["pending", "running", "processing"])
     .order("started_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -178,6 +180,22 @@ export async function checkAndAdvanceBulkSync(
   if (op.id !== job.operation_id) return job;
 
   if (op.status === "COMPLETED" && op.url) {
+    // Shopify's currentBulkOperation stays COMPLETED indefinitely once done, while
+    // ingesting a large catalog (download + upsert) can take longer than the client's
+    // poll interval. Without claiming the job first, every poll that arrives before
+    // the DB row flips to "completed" would independently see "COMPLETED" and kick off
+    // its own full re-ingestion. Atomically flip status so only one poll wins the race;
+    // everyone else just sees no rows updated and backs off.
+    const { data: claimed } = await supabaseAdmin
+      .from("sync_jobs")
+      .update({ status: "processing" })
+      .eq("id", job.id)
+      .eq("status", "running")
+      .select("id")
+      .maybeSingle();
+
+    if (!claimed) return job;
+
     if (job.type === "orders_sync") {
       await processOrdersJsonl(op.url, shopId, job.id);
     } else {

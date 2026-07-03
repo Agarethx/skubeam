@@ -687,8 +687,8 @@ export default function BsaleIntegrationPage() {
 
   const polledProductSyncJob = productSyncPollFetcher.data?.job ?? (trackedJobId ? null : activeProductSyncJob);
   const isProductSyncRunning = trackedJobId
-    ? !polledProductSyncJob || polledProductSyncJob.status === "running" || polledProductSyncJob.status === "pending"
-    : !!activeProductSyncJob && (activeProductSyncJob.status === "running" || activeProductSyncJob.status === "pending");
+    ? !polledProductSyncJob || ["running", "pending", "processing"].includes(polledProductSyncJob.status ?? "")
+    : !!activeProductSyncJob && ["running", "pending", "processing"].includes(activeProductSyncJob.status ?? "");
 
   useEffect(() => {
     if (!isProductSyncRunning) return;
