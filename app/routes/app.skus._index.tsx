@@ -19,6 +19,7 @@ import { useShopifyParams } from "../lib/navigate";
 import { listSkus, listUnpublishedSkus, getUnpublishedCount } from "../models/sku.server";
 import type { SkuStatus, SkuDetail } from "../models/sku.server";
 import { getActiveSyncJob, startBulkSync } from "../models/sync.server";
+import type { BsaleSearchVariant } from "../integrations/bsale/products.server";
 import type { Tables } from "../types/supabase";
 
 type SyncJob = Tables<"sync_jobs">;
@@ -179,6 +180,164 @@ function SyncProgressBanner({ job }: { job: SyncJob }) {
         </cancelFetcher.Form>
       </s-stack>
     </s-banner>
+  );
+}
+
+// ── Bsale search-and-publish (on-demand, never a bulk import) ─────────────────
+
+type PublishItemResult = { sku_code: string; success: boolean; error?: string };
+
+function BsaleSearchPanel({ onPublished }: { onPublished: () => void }) {
+  const [query,    setQuery]    = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [done,     setDone]     = useState<Set<string>>(new Set());
+  const [errors,   setErrors]   = useState<Map<string, string>>(new Map());
+
+  const searchFetcher  = useFetcher<{ results: BsaleSearchVariant[]; error?: string }>();
+  const publishFetcher = useFetcher<{ results: PublishItemResult[] }>();
+
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (trimmed.length < 2) return;
+    const t = setTimeout(() => {
+      searchFetcher.load(`/api/bsale/search?q=${encodeURIComponent(trimmed)}`);
+    }, 400);
+    return () => clearTimeout(t);
+  }, [query]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!publishFetcher.data?.results) return;
+    setDone((prev) => {
+      const next = new Set(prev);
+      for (const r of publishFetcher.data!.results) if (r.success) next.add(r.sku_code);
+      return next;
+    });
+    setErrors((prev) => {
+      const next = new Map(prev);
+      for (const r of publishFetcher.data!.results) {
+        if (r.success) next.delete(r.sku_code);
+        else next.set(r.sku_code, r.error ?? "Error desconocido");
+      }
+      return next;
+    });
+    setSelected(new Set());
+    onPublished();
+  }, [publishFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const results      = searchFetcher.data?.results ?? [];
+  const isSearching  = searchFetcher.state !== "idle";
+  const isPublishing = publishFetcher.state !== "idle";
+
+  function toggle(code: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(code)) next.delete(code); else next.add(code);
+      return next;
+    });
+  }
+
+  function publish(items: BsaleSearchVariant[]) {
+    publishFetcher.submit(JSON.stringify({ items }), {
+      method: "post", action: "/api/bsale/publish", encType: "application/json",
+    });
+  }
+
+  return (
+    <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+      <s-stack direction="block" gap="base">
+        <p style={{ margin: 0, fontSize: "var(--p-font-size-400, 1rem)", fontWeight: "var(--p-font-weight-bold, 700)" as React.CSSProperties["fontWeight"] }}>
+          Buscar en Bsale
+        </p>
+        <s-text color="subdued">
+          Busca por código SKU exacto o por nombre de producto (parcial). No importa todo el catálogo — solo trae lo que buscas, para publicarlo en Shopify al instante.
+        </s-text>
+
+        <div style={{ maxWidth: "400px" }}>
+          <s-search-field
+            label="Buscar en Bsale"
+            label-accessibility-visibility="hidden"
+            placeholder="Ej: ANZ410 o Mochila Doite…"
+            value={query}
+            onInput={(e: Event) => setQuery((e.target as HTMLInputElement).value)}
+          />
+        </div>
+
+        {searchFetcher.data?.error && <s-banner tone="critical" heading={searchFetcher.data.error} />}
+        {isSearching && <s-spinner />}
+
+        {!isSearching && query.trim().length >= 2 && results.length === 0 && !searchFetcher.data?.error && (
+          <s-text color="subdued">No se encontraron productos en Bsale para "{query.trim()}".</s-text>
+        )}
+
+        {results.length > 0 && (
+          <s-stack direction="block" gap="small">
+            {selected.size > 0 && (
+              <s-button
+                variant="primary"
+                onClick={() => publish(results.filter((r) => selected.has(r.sku_code)))}
+                {...(isPublishing ? { loading: true } : {})}
+              >
+                Publicar {selected.size} seleccionado{selected.size !== 1 ? "s" : ""}
+              </s-button>
+            )}
+
+            <div style={{ border: "1px solid var(--p-color-border, #e1e3e5)", borderRadius: "var(--p-border-radius-200, 8px)", overflow: "hidden" }}>
+              <div style={{
+                display: "grid", gridTemplateColumns: "32px 140px 1fr 100px 130px",
+                padding: "8px 16px", background: "var(--p-color-bg-surface-secondary, #f6f6f7)",
+                borderBottom: "1px solid var(--p-color-border, #e1e3e5)",
+              }}>
+                {(["", "SKU", "Producto", "Precio", ""] as const).map((label, i) => (
+                  <span key={i} style={{ fontSize: "var(--p-font-size-300, 0.75rem)", fontWeight: 600, color: "var(--p-color-text-subdued, #6d7175)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                    {label}
+                  </span>
+                ))}
+              </div>
+              {results.map((r, idx) => {
+                const isDone = done.has(r.sku_code);
+                const err    = errors.get(r.sku_code);
+                return (
+                  <div
+                    key={r.bsale_variant_id}
+                    style={{
+                      display: "grid", gridTemplateColumns: "32px 140px 1fr 100px 130px",
+                      padding: "10px 16px", alignItems: "center",
+                      background: idx % 2 === 0 ? "var(--p-color-bg-surface, #ffffff)" : "var(--p-color-bg-surface-secondary, #f6f6f7)",
+                      borderBottom: idx < results.length - 1 ? "1px solid var(--p-color-border-subdued, #e1e3e5)" : "none",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected.has(r.sku_code)}
+                      disabled={isDone}
+                      onChange={() => toggle(r.sku_code)}
+                    />
+                    <span style={{ fontWeight: 600, fontFamily: "monospace", fontSize: "var(--p-font-size-350, 0.875rem)" }}>{r.sku_code}</span>
+                    <span style={{ fontSize: "var(--p-font-size-350, 0.875rem)" }}>
+                      {r.product_name}{r.variant_description ? ` - ${r.variant_description}` : ""}
+                    </span>
+                    <span style={{ fontSize: "var(--p-font-size-350, 0.875rem)" }}>
+                      {r.price != null ? `$${r.price.toLocaleString("es-CL")}` : <s-badge tone="warning">Sin precio</s-badge>}
+                    </span>
+                    <span>
+                      {isDone ? (
+                        <s-badge tone="success">Publicado ✓</s-badge>
+                      ) : err ? (
+                        <s-badge tone="critical">{err}</s-badge>
+                      ) : (
+                        <s-button variant="secondary" onClick={() => publish([r])} {...(isPublishing ? { loading: true } : {})}>
+                          Publicar
+                        </s-button>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </s-stack>
+        )}
+      </s-stack>
+    </s-box>
   );
 }
 
@@ -351,10 +510,13 @@ export default function SkusIndex() {
               </s-paragraph>
             </s-banner>
 
-            {unpublishedCount === 0 ? (
-              <s-paragraph>No hay SKUs sin publicar. ✓</s-paragraph>
-            ) : (
+            <BsaleSearchPanel onPublished={() => revalidate()} />
+
+            {unpublishedCount === 0 ? null : (
               <s-stack direction="block" gap="base">
+                <p style={{ margin: 0, fontSize: "var(--p-font-size-400, 1rem)", fontWeight: "var(--p-font-weight-bold, 700)" as React.CSSProperties["fontWeight"] }}>
+                  Pendientes en SkuBeam
+                </p>
                 {/* Search — reuses localSearch + debounced navigate (tab preserved in URL) */}
                 <div style={{ maxWidth: "320px" }}>
                   <s-search-field

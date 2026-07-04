@@ -41,7 +41,7 @@
     "publishSelected": "Publicar seleccionados",
     "exportCsv": "Exportar CSV",
     "noSkus": "No hay SKUs registrados",
-    "unpublishedBanner": "Estos SKUs están sincronizados desde Bsale pero aún no han sido publicados en tu tienda Shopify. Selecciónalos y haz clic en Publicar para crearlos en Shopify."
+    "unpublishedBanner": "Busca productos en Bsale por SKU o nombre y publícalos directo en Shopify — no se importa el catálogo completo, solo lo que buscas."
   },
   "forecast": {
     "title": "Forecast & Reposición",

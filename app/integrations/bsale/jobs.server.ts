@@ -1,8 +1,8 @@
 import { supabaseAdmin } from "../../db.server";
-import { syncBsaleToSkuBeam } from "./products.server";
+import { syncBsalePricesToShopify } from "./products.server";
 import { syncBsaleStockToSkuBeam } from "./stocks.server";
 
-export type BsaleJobType = "bsale_products" | "bsale_stock";
+export type BsaleJobType = "bsale_prices" | "bsale_stock";
 
 // ── Create ────────────────────────────────────────────────────────────────────
 
@@ -24,7 +24,7 @@ export async function getActiveBsaleJob(shopId: string) {
     .from("sync_jobs")
     .select("id, type, status, records_processed, started_at")
     .eq("shop_id", shopId)
-    .in("type", ["bsale_products", "bsale_stock"])
+    .in("type", ["bsale_prices", "bsale_stock"])
     .in("status", ["pending", "running"])
     .order("started_at", { ascending: false })
     .limit(1)
@@ -57,16 +57,20 @@ async function failJob(jobId: string, err: unknown) {
     .eq("id", jobId);
 }
 
-async function resolveShopConfig(shopId: string): Promise<{ token: string; officeId: number | null }> {
+async function resolveShopConfig(shopId: string): Promise<{ token: string; officeId: number | null; priceListId: number | null }> {
   const { data } = await supabaseAdmin
     .from("shops")
-    .select("bsale_token, bsale_office_id")
+    .select("bsale_token, bsale_office_id, bsale_price_list_id")
     .eq("shop_id", shopId)
     .single();
 
   const token = data?.bsale_token ?? process.env.BSALE_ACCESS_TOKEN;
   if (!token) throw new Error("No Bsale token configured for this shop.");
-  return { token, officeId: data?.bsale_office_id ?? null };
+  return {
+    token,
+    officeId:    data?.bsale_office_id ?? null,
+    priceListId: data?.bsale_price_list_id ?? null,
+  };
 }
 
 async function stampLastSync(shopId: string) {
@@ -78,17 +82,18 @@ async function stampLastSync(shopId: string) {
 
 // ── Processors (called fire-and-forget from api.bsale.sync.tsx) ───────────────
 
-export async function processBsaleProductsJob(
+export async function processBsalePricesJob(
   jobId:  string,
   shopId: string,
 ): Promise<void> {
   try {
-    const { token } = await resolveShopConfig(shopId);
-    const result    = await syncBsaleToSkuBeam(shopId, token);
-    await completeJob(jobId, result.synced);
+    const { token, priceListId } = await resolveShopConfig(shopId);
+    if (!priceListId) throw new Error("No hay lista de precios configurada. Ve a Integraciones → Bsale para configurarla.");
+    const result = await syncBsalePricesToShopify(shopId, token, priceListId);
+    await completeJob(jobId, result.synced, result);
     await stampLastSync(shopId);
   } catch (err) {
-    console.error("[processBsaleProductsJob]", err);
+    console.error("[processBsalePricesJob]", err);
     await failJob(jobId, err);
   }
 }

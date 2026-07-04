@@ -1,9 +1,11 @@
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
 import type { StockSyncResult, StockSyncItemDetail } from "../integrations/bsale/stocks.server";
+import type { PriceSyncResult, PriceSyncItemDetail } from "../integrations/bsale/products.server";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useEffect, useRef, useState } from "react";
 
 type StockSyncPayload = StockSyncResult;
+type PriceSyncPayload = PriceSyncResult;
 import { useSkuBeamNavigate } from "../lib/navigate";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate, registerWebhooks } from "../shopify.server";
@@ -37,7 +39,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopId = session.shop;
 
-  const [shopRow, activeJob, recentBoletas, lastStockJob, activeProductSyncJob, lastProductSyncJob] = await Promise.all([
+  const [shopRow, activeJob, recentBoletas, lastStockJob, lastPriceJob, activeProductSyncJob, lastProductSyncJob] = await Promise.all([
     supabaseAdmin
       .from("shops")
       .select("bsale_token, bsale_last_sync, active_addons, bsale_price_list_id, bsale_office_id, bsale_document_type_id, bsale_document_code_sii")
@@ -57,6 +59,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .select("id, records_processed, completed_at, payload")
       .eq("shop_id", shopId)
       .eq("type", "bsale_stock")
+      .eq("status", "completed")
+      .order("completed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(({ data }) => data),
+    supabaseAdmin
+      .from("sync_jobs")
+      .select("id, records_processed, completed_at, payload")
+      .eq("shop_id", shopId)
+      .eq("type", "bsale_prices")
       .eq("status", "completed")
       .order("completed_at", { ascending: false })
       .limit(1)
@@ -101,6 +113,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     documentTypes,
     lastStockSync:  lastStockJob?.payload as StockSyncPayload | null ?? null,
     lastStockSyncAt: lastStockJob?.completed_at ?? null,
+    lastPriceSync:  lastPriceJob?.payload as PriceSyncPayload | null ?? null,
+    lastPriceSyncAt: lastPriceJob?.completed_at ?? null,
     activeProductSyncJob: activeProductSyncJob as SyncJob | null,
     lastProductSync: lastProductSyncJob
       ? {
@@ -193,9 +207,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (!shop?.bsale_token && !process.env.BSALE_ACCESS_TOKEN)
     return { error: "Configura el access token de Bsale antes de sincronizar." };
 
-  if (intent === "sync_products") {
-    const job = await createBsaleJob(shopId, "bsale_products");
-    return { jobId: job.id, jobType: "bsale_products" as const };
+  if (intent === "sync_prices") {
+    const job = await createBsaleJob(shopId, "bsale_prices");
+    return { jobId: job.id, jobType: "bsale_prices" as const };
   }
   if (intent === "sync_stock") {
     console.log("[stock-sync] action called, intent:", intent);
@@ -254,8 +268,8 @@ function formatDate(iso: string | null) {
 }
 
 function jobTypeLabel(type: string | null | undefined) {
-  if (type === "bsale_products") return "precios (Bsale)";
-  if (type === "bsale_stock")    return "stock (Bsale)";
+  if (type === "bsale_prices") return "precios (Bsale)";
+  if (type === "bsale_stock")  return "stock (Bsale)";
   return "datos";
 }
 
@@ -523,6 +537,90 @@ function StockDetailTable({
   );
 }
 
+function PriceDetailTable({
+  items,
+  page,
+  onPageChange,
+}: {
+  items:        PriceSyncItemDetail[];
+  page:         number;
+  onPageChange: (p: number) => void;
+}) {
+  const totalPages = Math.ceil(items.length / PAGE_SIZE_DETAIL);
+  const slice      = items.slice((page - 1) * PAGE_SIZE_DETAIL, page * PAGE_SIZE_DETAIL);
+
+  const changedCount   = items.filter((i) => i.changed).length;
+  const unchangedCount = items.length - changedCount;
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+        <s-stack direction="block" gap="small">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <p style={HEADING_STYLE}>Detalle por SKU</p>
+            <div style={{ display: "flex", gap: 8 }}>
+              {changedCount > 0   && <s-badge tone="success">{changedCount} actualizados</s-badge>}
+              {unchangedCount > 0 && <s-badge tone="neutral">{unchangedCount} sin cambio</s-badge>}
+            </div>
+          </div>
+
+          <SimpleTable
+            cols={["SKU", "Título", "Precio Shopify", "Precio Bsale", "Cambio"]}
+            rows={slice.map((item) => {
+              const before  = item.price_before;
+              const diff    = before != null ? item.price_after - before : null;
+              const diffColor = diff && diff > 0
+                ? "var(--p-color-text-success, #008060)"
+                : diff && diff < 0
+                ? "var(--p-color-text-critical, #d72c0d)"
+                : "var(--p-color-text-subdued, #6d7175)";
+
+              return [
+                <span key="sku"    style={{ fontFamily: "monospace", fontWeight: 600 }}>{item.sku_code}</span>,
+                <span key="title"  style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>{item.title ?? "—"}</span>,
+                <span key="before" style={{ textAlign: "right" as const, display: "block" }}>
+                  {before != null ? `$${before.toLocaleString("es-CL")}` : "—"}
+                </span>,
+                <span key="after"  style={{ textAlign: "right" as const, display: "block", fontWeight: item.changed ? 600 : 400 }}>
+                  ${item.price_after.toLocaleString("es-CL")}
+                </span>,
+                <span key="diff"   style={{ color: diffColor, fontWeight: 600, textAlign: "right" as const, display: "block" }}>
+                  {diff == null || diff === 0 ? "—" : diff > 0 ? `+$${diff.toLocaleString("es-CL")}` : `-$${Math.abs(diff).toLocaleString("es-CL")}`}
+                </span>,
+              ];
+            })}
+          />
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 8 }}>
+              <s-text color="subdued">
+                {(page - 1) * PAGE_SIZE_DETAIL + 1}–{Math.min(page * PAGE_SIZE_DETAIL, items.length)} de {items.length} SKUs
+              </s-text>
+              <div style={{ display: "flex", gap: 8 }}>
+                <s-button
+                  variant="tertiary"
+                  {...(page <= 1 ? { disabled: true } : {})}
+                  onClick={() => onPageChange(page - 1)}
+                >
+                  ← Anterior
+                </s-button>
+                <s-button
+                  variant="tertiary"
+                  {...(page >= totalPages ? { disabled: true } : {})}
+                  onClick={() => onPageChange(page + 1)}
+                >
+                  Siguiente →
+                </s-button>
+              </div>
+            </div>
+          )}
+        </s-stack>
+      </s-box>
+    </div>
+  );
+}
+
 // ── Product-sync issue tables (duplicados / sin SKU / otros errores) ─────────
 
 type SkuSyncIssue = {
@@ -600,6 +698,7 @@ export default function BsaleIntegrationPage() {
     bsaleLastSync, activeJob, hasAddon, recentBoletas,
     priceLists, offices, documentTypes,
     lastStockSync, lastStockSyncAt,
+    lastPriceSync, lastPriceSyncAt,
     activeProductSyncJob, lastProductSync,
   } = useLoaderData<typeof loader>();
 
@@ -617,12 +716,14 @@ export default function BsaleIntegrationPage() {
   const [selectedDocTypeId,    setSelectedDocTypeId]    = useState<number | "">(documentTypeId ?? "");
   const [stockDetailPage,      setStockDetailPage]      = useState(1);
   const [stockSearch,          setStockSearch]          = useState("");
+  const [priceDetailPage,      setPriceDetailPage]      = useState(1);
+  const [priceSearch,          setPriceSearch]          = useState("");
 
   // Fetchers
   const tokenFetcher   = useFetcher<{ success?: string; error?: string; tokenSaved?: boolean }>();
   const webhookFetcher = useFetcher<{ success?: string; error?: string }>();
   const setupFetcher   = useFetcher<{ ok?: boolean }>();
-  const createFetcher  = useFetcher<{ jobId?: string; jobType?: "bsale_products" | "bsale_stock"; error?: string; success?: string }>();
+  const createFetcher  = useFetcher<{ jobId?: string; jobType?: "bsale_prices" | "bsale_stock"; error?: string; success?: string }>();
   const triggerFetcher = useFetcher();
   const statusFetcher  = useFetcher<{ status: string | null; records_processed: number; type: string | null }>();
 
@@ -924,11 +1025,11 @@ export default function BsaleIntegrationPage() {
             </s-box>
           )}
 
-          {/* ── Step 4: Confirm + sync ───────────────────────────────────── */}
+          {/* ── Step 4: Confirm ─────────────────────────────────────────── */}
           {step === 4 && (
             <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
               <s-stack direction="block" gap="base">
-                <p style={HEADING_STYLE}>¡Todo listo! Confirma y sincroniza</p>
+                <p style={HEADING_STYLE}>¡Todo listo!</p>
 
                 {/* Summary */}
                 <div
@@ -958,30 +1059,14 @@ export default function BsaleIntegrationPage() {
                   </s-stack>
                 </div>
 
-                {isRunning && (
-                  <s-banner tone="info">
-                    <s-stack direction="inline" gap="small">
-                      <s-spinner />
-                      <s-text>Sincronizando {jobTypeLabel(runningType)}{progressLabel}…</s-text>
-                    </s-stack>
-                  </s-banner>
-                )}
+                <s-text color="subdued">
+                  Bsale ya está conectado. Usa los botones de "Sincronización manual" abajo para traer precios y stock
+                  hacia los productos que ya tengas publicados en Shopify.
+                </s-text>
 
-                <s-stack direction="inline" gap="small">
-                  <createFetcher.Form method="post">
-                    <input type="hidden" name="intent" value="sync_products" />
-                    <s-button
-                      type="submit"
-                      variant="primary"
-                      {...(isRunning || createFetcher.state !== "idle" ? { loading: true } : {})}
-                    >
-                      Sincronizar ahora
-                    </s-button>
-                  </createFetcher.Form>
-                  <s-button variant="secondary" onClick={() => setShowWizard(false)}>
-                    Omitir por ahora
-                  </s-button>
-                </s-stack>
+                <s-button variant="primary" onClick={() => setShowWizard(false)}>
+                  Finalizar
+                </s-button>
               </s-stack>
             </s-box>
           )}
@@ -1131,24 +1216,17 @@ export default function BsaleIntegrationPage() {
 
                   <s-stack direction="block" gap="small">
                     <s-text type="strong">Precios (Bsale)</s-text>
-                    <s-text color="subdued">Importa el catálogo de variantes desde Bsale con precios de la lista configurada.</s-text>
-                    <s-stack direction="inline" gap="small">
-                      <createFetcher.Form method="post">
-                        <input type="hidden" name="intent" value="sync_products" />
-                        <s-button
-                          type="submit"
-                          {...(isRunning || createFetcher.state !== "idle" ? { loading: true } : {})}
-                          {...(!hasToken ? { disabled: true } : {})}
-                        >
-                          Sincronizar precios
-                        </s-button>
-                      </createFetcher.Form>
-                      {hasToken && !isRunning && (
-                        <s-button variant="secondary" onClick={() => navigate("/app/integrations/bsale/diff")}>
-                          Revisar diff →
-                        </s-button>
-                      )}
-                    </s-stack>
+                    <s-text color="subdued">Trae los precios actuales desde la lista de precios configurada y los actualiza en Shopify — solo para productos ya publicados.</s-text>
+                    <createFetcher.Form method="post">
+                      <input type="hidden" name="intent" value="sync_prices" />
+                      <s-button
+                        type="submit"
+                        {...(isRunning || createFetcher.state !== "idle" ? { loading: true } : {})}
+                        {...(!hasToken ? { disabled: true } : {})}
+                      >
+                        Sincronizar precios
+                      </s-button>
+                    </createFetcher.Form>
                   </s-stack>
 
                   <div style={{ height: "1px", background: "var(--p-color-border, #e1e3e5)" }} />
@@ -1371,6 +1449,118 @@ export default function BsaleIntegrationPage() {
                     <SimpleTable
                       cols={["SKU", "Título", "Error"]}
                       rows={lastStockSync.shopify_push_errors.map((d) => [
+                        <span key="sku"   style={{ fontFamily: "monospace", fontWeight: 600 }}>{d.sku_code}</span>,
+                        d.title ?? "—",
+                        <span key="error" style={{ color: "var(--p-color-text-critical, #d72c0d)", fontSize: "var(--p-font-size-300, 0.75rem)" }}>{d.error}</span>,
+                      ])}
+                    />
+                  </s-stack>
+                </s-box>
+              )}
+            </s-section>
+          )}
+
+          {/* ── Último sync de precios ───────────────────────────────────── */}
+          {lastPriceSync && (
+            <s-section heading="Último sync de precios">
+              {/* Stats row */}
+              <s-grid gridTemplateColumns="repeat(auto-fit, minmax(140px, 1fr))" gap="base">
+                {(
+                  [
+                    { label: "SKUs publicados",     value: lastPriceSync.total_bsale_codes, tone: undefined },
+                    { label: "Matcheados con Bsale", value: lastPriceSync.shopify_matched,  tone: "success" as const },
+                    { label: "No en Bsale",         value: lastPriceSync.skipped,           tone: lastPriceSync.skipped > 0 ? "warning" as const : undefined },
+                    { label: "Sync Shopify",        value: lastPriceSync.shopify_updated ?? 0, tone: (lastPriceSync.shopify_updated ?? 0) > 0 ? "success" as const : undefined },
+                    { label: "Con error",           value: lastPriceSync.errors,            tone: lastPriceSync.errors > 0 ? "critical" as const : undefined },
+                    { label: "Error en Shopify",    value: (lastPriceSync.shopify_push_errors ?? []).length, tone: (lastPriceSync.shopify_push_errors ?? []).length > 0 ? "critical" as const : undefined },
+                  ] as Array<{ label: string; value: number; tone?: "success" | "warning" | "critical" }>
+                ).map(({ label, value, tone }) => (
+                  <s-box key={label} padding="base" borderWidth="small" borderRadius="base" background="base">
+                    <s-stack direction="block" gap="small">
+                      <s-text color="subdued">{label}</s-text>
+                      {tone
+                        ? <s-badge tone={tone}>{value.toLocaleString("es-CL")}</s-badge>
+                        : <p style={{ margin: 0, fontWeight: 600, fontSize: "var(--p-font-size-500, 1.25rem)" }}>{value.toLocaleString("es-CL")}</p>
+                      }
+                    </s-stack>
+                  </s-box>
+                ))}
+              </s-grid>
+
+              <div style={{ marginTop: 16, marginBottom: 16 }}>
+                <s-text color="subdued">Ejecutado: {formatDate(lastPriceSyncAt)}</s-text>
+              </div>
+
+              {/* Buscar un SKU específico en el resultado del último sync */}
+              <div style={{ marginBottom: 16, maxWidth: 320 }}>
+                <label style={{ display: "block" }}>
+                  <span style={LABEL_STYLE}>Buscar SKU en el último sync</span>
+                  <input
+                    type="text"
+                    value={priceSearch}
+                    onChange={(e) => { setPriceSearch(e.target.value); setPriceDetailPage(1); }}
+                    placeholder="Ej: DEF111"
+                    style={INPUT_STYLE}
+                  />
+                </label>
+              </div>
+
+              {/* ── Detalle por SKU ── */}
+              {lastPriceSync.items && lastPriceSync.items.length > 0 && (() => {
+                const filtered = priceSearch.trim()
+                  ? lastPriceSync.items.filter((i) => i.sku_code.toLowerCase().includes(priceSearch.trim().toLowerCase()))
+                  : lastPriceSync.items;
+                return filtered.length > 0 ? (
+                  <PriceDetailTable
+                    items={filtered}
+                    page={priceDetailPage}
+                    onPageChange={setPriceDetailPage}
+                  />
+                ) : (
+                  <s-banner tone="info" heading={`"${priceSearch}" no aparece en el detalle de este sync.`} />
+                );
+              })()}
+
+              {/* SKUs no encontrados en Bsale */}
+              {(() => {
+                const skippedFiltered = (lastPriceSync.skipped_items ?? []).filter(
+                  (i) => !priceSearch.trim() || i.sku_code.toLowerCase().includes(priceSearch.trim().toLowerCase()),
+                );
+                return skippedFiltered.length > 0 && <SkippedTable items={skippedFiltered} />;
+              })()}
+
+              {/* Error details — Supabase write errors */}
+              {lastPriceSync.error_details.length > 0 && (
+                <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+                  <s-stack direction="block" gap="small">
+                    <p style={{ ...HEADING_STYLE, color: "var(--p-color-text-critical, #d72c0d)" }}>
+                      SKUs con error ({lastPriceSync.error_details.length})
+                    </p>
+                    <SimpleTable
+                      cols={["SKU", "Título", "Error"]}
+                      rows={lastPriceSync.error_details.map((d) => [
+                        <span key="sku"   style={{ fontFamily: "monospace", fontWeight: 600 }}>{d.sku_code}</span>,
+                        d.title ?? "—",
+                        <span key="error" style={{ color: "var(--p-color-text-critical, #d72c0d)", fontSize: "var(--p-font-size-300, 0.75rem)" }}>{d.error}</span>,
+                      ])}
+                    />
+                  </s-stack>
+                </s-box>
+              )}
+
+              {/* Shopify push errors */}
+              {(lastPriceSync.shopify_push_errors ?? []).length > 0 && (
+                <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+                  <s-stack direction="block" gap="small">
+                    <p style={{ ...HEADING_STYLE, color: "var(--p-color-text-critical, #d72c0d)" }}>
+                      SKUs no actualizados en Shopify ({lastPriceSync.shopify_push_errors.length})
+                    </p>
+                    <s-text color="subdued">
+                      El precio de Bsale para estos SKUs sí se guardó en SkuBeam, pero Shopify rechazó la actualización.
+                    </s-text>
+                    <SimpleTable
+                      cols={["SKU", "Título", "Error"]}
+                      rows={lastPriceSync.shopify_push_errors.map((d) => [
                         <span key="sku"   style={{ fontFamily: "monospace", fontWeight: 600 }}>{d.sku_code}</span>,
                         d.title ?? "—",
                         <span key="error" style={{ color: "var(--p-color-text-critical, #d72c0d)", fontSize: "var(--p-font-size-300, 0.75rem)" }}>{d.error}</span>,

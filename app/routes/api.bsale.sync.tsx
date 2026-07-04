@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import { supabaseAdmin } from "../db.server";
 import {
-  processBsaleProductsJob,
+  processBsalePricesJob,
   processBsaleStockJob,
 } from "../integrations/bsale/jobs.server";
 
@@ -35,9 +35,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (job.status !== "running") return { error: "Job is not in running state" };
 
   // Fire-and-forget: return immediately, process in background Node.js event loop
-  if (job.type === "bsale_products") {
-    processBsaleProductsJob(jobId, shopId).catch((err) =>
-      console.error("[api.bsale.sync] bsale_products:", err),
+  if (job.type === "bsale_prices") {
+    processBsalePricesJob(jobId, shopId).catch((err) =>
+      console.error("[api.bsale.sync] bsale_prices:", err),
     );
   } else if (job.type === "bsale_stock") {
     processBsaleStockJob(jobId, shopId).catch((err) =>
