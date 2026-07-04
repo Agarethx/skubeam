@@ -1060,7 +1060,7 @@ export default function BsaleIntegrationPage() {
                 </div>
 
                 <s-text color="subdued">
-                  Bsale ya está conectado. Usa los botones de "Sincronización manual" abajo para traer precios y stock
+                  Bsale ya está conectado. Usa los botones de &quot;Sincronización manual&quot; abajo para traer precios y stock
                   hacia los productos que ya tengas publicados en Shopify.
                 </s-text>
 

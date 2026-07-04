@@ -266,7 +266,7 @@ function BsaleSearchPanel({ onPublished }: { onPublished: () => void }) {
         {isSearching && <s-spinner />}
 
         {!isSearching && query.trim().length >= 2 && results.length === 0 && !searchFetcher.data?.error && (
-          <s-text color="subdued">No se encontraron productos en Bsale para "{query.trim()}".</s-text>
+          <s-text color="subdued">No se encontraron productos en Bsale para &quot;{query.trim()}&quot;.</s-text>
         )}
 
         {results.length > 0 && (
