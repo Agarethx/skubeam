@@ -32,7 +32,11 @@ export async function listSkus(
     .range(offset, offset + PAGE_SIZE - 1);
 
   if (search) query = query.ilike("sku_code", `%${search}%`);
+  // Archived = no longer exists in Shopify (auto-archived on sync, never deleted so
+  // sales history is preserved). Don't count it in the default "Todos" view — the
+  // merchant explicitly picking the "Archivado" filter is the only way to see them.
   if (status) query = query.eq("status", status);
+  else query = query.neq("status", "archived");
 
   const { data, error, count } = await query;
   if (error) throw new Error(`listSkus: ${error.message}`);

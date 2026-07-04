@@ -25,9 +25,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       getAbcAnalysis(shopId),
       getForecastForShop(shopId),
       getLowestHealthScoreSkus(shopId, 10),
-      supabaseAdmin.from("skus").select("id", { count: "exact", head: true }).eq("shop_id", shopId),
-      // Direct count of SKUs published to Shopify (shopify_variant_id IS NOT NULL)
-      supabaseAdmin.from("skus").select("*", { count: "exact", head: true }).eq("shop_id", shopId).not("shopify_variant_id", "is", null),
+      supabaseAdmin.from("skus").select("id", { count: "exact", head: true }).eq("shop_id", shopId).neq("status", "archived"),
+      // Direct count of SKUs published to Shopify (shopify_variant_id IS NOT NULL) — archived
+      // SKUs still carry a shopify_variant_id (kept for history) so they must be excluded here too.
+      supabaseAdmin.from("skus").select("*", { count: "exact", head: true }).eq("shop_id", shopId).not("shopify_variant_id", "is", null).neq("status", "archived"),
       supabaseAdmin.from("woo_connections").select("id").eq("shop_id", shopId).limit(1).maybeSingle(),
     ]);
 
