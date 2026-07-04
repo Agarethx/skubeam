@@ -570,6 +570,11 @@ export async function processBulkJsonl(
     }
   }
 
+  // Every variant_id Shopify reports as live in THIS export — used to tell a genuine
+  // duplicate SKU (two variants both still alive) apart from a stale row whose
+  // variant was deleted/recreated in Shopify (product re-import, merge, etc.).
+  const liveVariantIds = new Set(variants.map((v) => v.shopify_variant_id));
+
   // Upsert in batches of 500 — a batch-level failure (e.g. one variant's SKU
   // colliding with an existing row under skus_shop_sku_unique) must not silently
   // drop the other ~499 valid rows in that batch, so retry row-by-row on error.
@@ -599,24 +604,7 @@ export async function processBulkJsonl(
       const isDuplicateSku =
         rowError.code === "23505" && rowError.message.includes("skus_shop_sku_unique");
 
-      if (isDuplicateSku) {
-        const { data: existing } = await supabaseAdmin
-          .from("skus")
-          .select("title")
-          .eq("shop_id", shopId)
-          .eq("sku_code", row.sku_code)
-          .maybeSingle();
-
-        skippedItems.push({
-          shopify_variant_id: row.shopify_variant_id,
-          shopify_product_id: row.shopify_product_id,
-          product_title: row.title ?? row.sku_code,
-          variant_title: null,
-          sku_code: row.sku_code,
-          reason: "duplicate_sku",
-          conflicts_with_title: existing?.title ?? undefined,
-        });
-      } else {
+      if (!isDuplicateSku) {
         skippedItems.push({
           shopify_variant_id: row.shopify_variant_id,
           shopify_product_id: row.shopify_product_id,
@@ -626,7 +614,63 @@ export async function processBulkJsonl(
           reason: "other_error",
           detail: rowError.message,
         });
+        continue;
       }
+
+      const { data: existing } = await supabaseAdmin
+        .from("skus")
+        .select("id, title, shopify_variant_id")
+        .eq("shop_id", shopId)
+        .eq("sku_code", row.sku_code)
+        .maybeSingle();
+
+      const existingIsStale =
+        existing && !liveVariantIds.has(existing.shopify_variant_id ?? -1);
+
+      if (existingIsStale) {
+        // Not a real duplicate — the row on file points to a variant that no
+        // longer exists in Shopify. Re-link it to the current one instead of
+        // reporting a false "duplicate" every sync forever.
+        const { error: relinkError } = await supabaseAdmin
+          .from("skus")
+          .update({
+            shopify_variant_id: row.shopify_variant_id,
+            shopify_product_id: row.shopify_product_id,
+            barcode:            row.barcode,
+            title:              row.title,
+            vendor:             row.vendor,
+            product_type:       row.product_type,
+            cost_price:         row.cost_price,
+            status:             row.status,
+            updated_at:         row.updated_at,
+          })
+          .eq("id", existing!.id);
+
+        if (!relinkError) {
+          processed++;
+          continue;
+        }
+        skippedItems.push({
+          shopify_variant_id: row.shopify_variant_id,
+          shopify_product_id: row.shopify_product_id,
+          product_title: row.title ?? row.sku_code,
+          variant_title: null,
+          sku_code: row.sku_code,
+          reason: "other_error",
+          detail: relinkError.message,
+        });
+        continue;
+      }
+
+      skippedItems.push({
+        shopify_variant_id: row.shopify_variant_id,
+        shopify_product_id: row.shopify_product_id,
+        product_title: row.title ?? row.sku_code,
+        variant_title: null,
+        sku_code: row.sku_code,
+        reason: "duplicate_sku",
+        conflicts_with_title: existing?.title ?? undefined,
+      });
     }
   }
 
