@@ -476,6 +476,7 @@ export type SkippedProductSyncItem = {
 export type ProductSyncSummary = {
   records_total: number;
   skipped: SkippedProductSyncItem[];
+  archived: number;
 };
 
 export async function processBulkJsonl(
@@ -674,7 +675,41 @@ export async function processBulkJsonl(
     }
   }
 
-  const summary: ProductSyncSummary = { records_total: recordsTotal, skipped: skippedItems };
+  // Archive (never delete) any previously-synced SKU whose variant no longer shows
+  // up in Shopify's current export — product/variant deleted since the last sync.
+  // Archiving instead of deleting keeps sales_history/inventory_levels intact for
+  // reporting; if the variant ever reappears with the same SKU code, the self-heal
+  // relink above resurrects it (sets status back to "active") automatically.
+  const PRUNE_PAGE = 1000;
+  const toArchive: string[] = [];
+  for (let from = 0; ; from += PRUNE_PAGE) {
+    const { data, error } = await supabaseAdmin
+      .from("skus")
+      .select("id, shopify_variant_id")
+      .eq("shop_id", shopId)
+      .not("shopify_variant_id", "is", null)
+      .neq("status", "archived")
+      .order("id", { ascending: true })
+      .range(from, from + PRUNE_PAGE - 1);
+
+    if (error) { console.error("processBulkJsonl archive-scan:", error.message); break; }
+    if (!data || data.length === 0) break;
+    for (const row of data) {
+      if (!liveVariantIds.has(row.shopify_variant_id as number)) toArchive.push(row.id);
+    }
+    if (data.length < PRUNE_PAGE) break;
+  }
+
+  let archived = 0;
+  for (let i = 0; i < toArchive.length; i += 500) {
+    const chunk = toArchive.slice(i, i + 500);
+    const { error } = await supabaseAdmin.from("skus").update({ status: "archived" }).in("id", chunk);
+    if (error) console.error("processBulkJsonl archive batch:", error.message);
+    else archived += chunk.length;
+  }
+  if (archived > 0) console.log(`processBulkJsonl: archived ${archived} SKUs no longer in Shopify`);
+
+  const summary: ProductSyncSummary = { records_total: recordsTotal, skipped: skippedItems, archived };
 
   await supabaseAdmin
     .from("sync_jobs")

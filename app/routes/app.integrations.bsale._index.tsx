@@ -1195,6 +1195,7 @@ export default function BsaleIntegrationPage() {
                         { label: "Duplicados",            value: duplicates.length, tone: duplicates.length > 0 ? "warning" as const : undefined },
                         { label: "Sin SKU",                value: noSku.length,      tone: noSku.length > 0 ? "warning" as const : undefined },
                         { label: "Otros errores",         value: others.length,     tone: others.length > 0 ? "critical" as const : undefined },
+                        { label: "Archivados",             value: summary?.archived ?? 0, tone: (summary?.archived ?? 0) > 0 ? "warning" as const : undefined },
                       ] as Array<{ label: string; value: number; tone?: "success" | "warning" | "critical" }>
                     ).map(({ label, value, tone }) => (
                       <s-box key={label} padding="base" borderWidth="small" borderRadius="base" background="base">
