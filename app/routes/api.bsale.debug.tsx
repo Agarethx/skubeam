@@ -145,13 +145,24 @@ export async function action({ request }: ActionFunctionArgs) {
   // Fetch orden real desde Shopify REST
   console.log("[bsale-debug] Fetching orden Shopify:", orderId);
 
-  interface RawLineItem { id: number; sku: string | null; quantity: number; price: string }
+  interface RawLineItem {
+    id: number;
+    sku: string | null;
+    quantity: number;
+    price: string;
+    discount_allocations?: Array<{ amount: string }>;
+  }
   interface RawOrder {
     id: number;
     email?: string;
+    contact_email?: string;
     created_at: string;
     line_items: RawLineItem[];
+    shipping_lines?: ShopifyOrderForBoleta["shipping_lines"];
     total_price: string;
+    customer?: ShopifyOrderForBoleta["customer"];
+    billing_address?: ShopifyOrderForBoleta["billing_address"];
+    shipping_address?: ShopifyOrderForBoleta["shipping_address"];
   }
 
   let rawOrder: RawOrder;
@@ -159,7 +170,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const body = await shopifyRestGet(
       shopId,
       `orders/${orderId}.json`,
-      "fields=id,email,created_at,line_items,total_price",
+      "fields=id,email,contact_email,created_at,line_items,shipping_lines,total_price,customer,billing_address,shipping_address",
     ) as { order?: RawOrder };
 
     if (!body.order) throw new Error("Orden no encontrada");
@@ -180,13 +191,23 @@ export async function action({ request }: ActionFunctionArgs) {
 
   // Adaptar al tipo ShopifyOrderForBoleta (sku required string)
   const order: ShopifyOrderForBoleta = {
-    id:          rawOrder.id,
-    email:       rawOrder.email,
-    created_at:  rawOrder.created_at,
-    total_price: rawOrder.total_price,
-    line_items:  rawOrder.line_items
+    id:               rawOrder.id,
+    email:            rawOrder.email,
+    contact_email:    rawOrder.contact_email,
+    created_at:       rawOrder.created_at,
+    total_price:      rawOrder.total_price,
+    shipping_lines:   rawOrder.shipping_lines,
+    customer:         rawOrder.customer,
+    billing_address:  rawOrder.billing_address,
+    shipping_address: rawOrder.shipping_address,
+    line_items:       rawOrder.line_items
       .filter((li) => li.sku)
-      .map((li) => ({ sku: li.sku!, quantity: li.quantity, price: li.price })),
+      .map((li) => ({
+        sku:                  li.sku!,
+        quantity:             li.quantity,
+        price:                li.price,
+        discount_allocations: li.discount_allocations,
+      })),
   };
 
   console.log("[bsale-debug] Order adaptada para emitBoleta:", {

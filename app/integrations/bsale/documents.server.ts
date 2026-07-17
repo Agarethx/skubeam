@@ -3,20 +3,31 @@ import { supabaseAdmin } from "../../db.server";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface ShopifyOrderLine {
+export interface ShopifyDiscountAllocation {
+  amount: string;
+}
+
+export interface ShopifyOrderLine {
   sku:      string;
   quantity: number;
   price:    string;
+  discount_allocations?: ShopifyDiscountAllocation[];
 }
 
-interface ShopifyCustomer {
+export interface ShopifyShippingLine {
+  title?: string;
+  price:  string;
+  discount_allocations?: ShopifyDiscountAllocation[];
+}
+
+export interface ShopifyCustomer {
   first_name?: string;
   last_name?:  string;
   email?:      string;
   phone?:      string;
 }
 
-interface ShopifyBillingAddress {
+export interface ShopifyOrderAddress {
   first_name?: string;
   last_name?:  string;
   company?:    string;
@@ -26,13 +37,16 @@ interface ShopifyBillingAddress {
 }
 
 export interface ShopifyOrderForBoleta {
-  id:               number;
-  email?:           string;
-  created_at:       string;
-  line_items:       ShopifyOrderLine[];
-  total_price:      string;
-  customer?:        ShopifyCustomer;
-  billing_address?: ShopifyBillingAddress;
+  id:                number;
+  email?:            string;
+  contact_email?:    string;
+  created_at:        string;
+  line_items:        ShopifyOrderLine[];
+  shipping_lines?:   ShopifyShippingLine[];
+  total_price:       string;
+  customer?:         ShopifyCustomer;
+  billing_address?:  ShopifyOrderAddress;
+  shipping_address?: ShopifyOrderAddress;
 }
 
 interface BsaleDocumentResponse {
@@ -40,6 +54,96 @@ interface BsaleDocumentResponse {
   number?:     number;
   urlPdf?:     string;
   totalAmount?: number;
+}
+
+// ── Payload builders (pure — unit tested) ─────────────────────────────────────
+
+const IVA = 1.19;
+// Use SII tax code 14 (IVA 19%) — portable across Bsale accounts
+const IVA_TAXES = [{ code: 14, percentage: 19 }];
+
+// netUnitValue admits decimals in Bsale — keep 4 decimals so the document
+// total matches what the customer actually paid after discounts
+const toNetUnit = (grossUnit: number) =>
+  Math.round((grossUnit / IVA) * 10000) / 10000;
+
+export interface BsaleDetail {
+  code?:        string;
+  comment?:     string;
+  netUnitValue: number;
+  quantity:     number;
+  taxes:        typeof IVA_TAXES;
+}
+
+// discount_allocations carries both line-level and order-level discount
+// codes — subtract them so Bsale gets the price the customer paid
+const sumDiscounts = (allocations?: ShopifyDiscountAllocation[]) =>
+  (allocations ?? []).reduce((sum, d) => sum + parseFloat(d.amount || "0"), 0);
+
+export function buildBoletaDetails(order: ShopifyOrderForBoleta): BsaleDetail[] {
+  const details: BsaleDetail[] = order.line_items
+    .filter((item) => item.sku)
+    .map((item) => {
+      const gross    = parseFloat(item.price) * item.quantity;
+      const discount = sumDiscounts(item.discount_allocations);
+      const net      = Math.max(gross - discount, 0);
+      return {
+        code:         item.sku,
+        netUnitValue: toNetUnit(net / item.quantity),
+        quantity:     item.quantity,
+        taxes:        IVA_TAXES,
+      };
+    });
+
+  if (details.length === 0) {
+    throw new Error("No hay items con SKU válido en la orden");
+  }
+
+  // Shipping (e.g. Bluexpress) goes as a detail without variant code —
+  // Bsale accepts free-form items via `comment`
+  const shippingTotal = (order.shipping_lines ?? []).reduce((sum, line) => {
+    const price = parseFloat(line.price || "0") - sumDiscounts(line.discount_allocations);
+    return sum + Math.max(price, 0);
+  }, 0);
+
+  if (shippingTotal > 0) {
+    details.push({
+      comment:      order.shipping_lines?.[0]?.title || "Despacho",
+      netUnitValue: toNetUnit(shippingTotal),
+      quantity:     1,
+      taxes:        IVA_TAXES,
+    });
+  }
+
+  return details;
+}
+
+export function buildBoletaClient(order: ShopifyOrderForBoleta): Record<string, unknown> {
+  // Prefer shipping_address + contact_email: that's what the buyer typed in
+  // the checkout form. With wallet gateways (Mercado Pago) Shopify fills
+  // billing_address/customer with data returned by the gateway account.
+  const shipping  = order.shipping_address;
+  const billing   = order.billing_address;
+  const email     = order.contact_email ?? order.email ?? order.customer?.email;
+  const firstName = shipping?.first_name ?? order.customer?.first_name ?? billing?.first_name;
+  const lastName  = shipping?.last_name  ?? order.customer?.last_name  ?? billing?.last_name;
+  const company   = shipping?.company ?? billing?.company;
+  const phone     = shipping?.phone ?? order.customer?.phone ?? billing?.phone;
+  const address   = shipping?.address1 ?? billing?.address1;
+  const city      = shipping?.city ?? billing?.city;
+
+  const client: Record<string, unknown> = {
+    companyOrPerson: company ? 1 : 0,
+  };
+  if (email)     client.email     = email;
+  if (firstName) client.firstName = firstName;
+  if (lastName)  client.lastName  = lastName;
+  if (company)   client.company   = company;
+  if (phone)     client.phone     = phone;
+  if (address)   client.address   = address;
+  if (city)      client.city      = city;
+
+  return client;
 }
 
 // ── emitBoleta ────────────────────────────────────────────────────────────────
@@ -99,23 +203,11 @@ export async function emitBoleta(
     );
 
   try {
-    const details = order.line_items
-      .filter((item) => item.sku)
-      .map((item) => ({
-        code:         item.sku,
-        netUnitValue: Math.round(parseFloat(item.price) / 1.19),
-        quantity:     item.quantity,
-        // Use SII tax code 14 (IVA 19%) — portable across Bsale accounts
-        taxes: [{ code: 14, percentage: 19 }],
-      }));
+    const details = buildBoletaDetails(order);
 
-    console.log(`[bsale-docs] Line items para Bsale:`, details.map((d) => ({
-      code: d.code, qty: d.quantity, netUnitValue: d.netUnitValue,
+    console.log(`[bsale-docs] Detalles para Bsale:`, details.map((d) => ({
+      code: d.code, comment: d.comment, qty: d.quantity, netUnitValue: d.netUnitValue,
     })));
-
-    if (details.length === 0) {
-      throw new Error("No hay items con SKU válido en la orden");
-    }
 
     const emissionDate = Math.floor(new Date(order.created_at).getTime() / 1000);
 
@@ -123,27 +215,11 @@ export async function emitBoleta(
     // SII document (boleta 39, factura 33): uses codeSii, declareSii=1, expirationDate required
     const isSiiDocument = !!codeSii;
 
-    // Build client object from Shopify order data
-    const email     = order.email ?? order.customer?.email;
-    const firstName = order.customer?.first_name ?? order.billing_address?.first_name;
-    const lastName  = order.customer?.last_name  ?? order.billing_address?.last_name;
-    const company   = order.billing_address?.company;
-    const phone     = order.customer?.phone ?? order.billing_address?.phone;
-    const address   = order.billing_address?.address1;
-    const city      = order.billing_address?.city;
+    const client = buildBoletaClient(order);
 
-    const client: Record<string, unknown> = {
-      companyOrPerson: company ? 1 : 0,
-    };
-    if (email)     client.email     = email;
-    if (firstName) client.firstName = firstName;
-    if (lastName)  client.lastName  = lastName;
-    if (company)   client.company   = company;
-    if (phone)     client.phone     = phone;
-    if (address)   client.address   = address;
-    if (city)      client.city      = city;
-
-    console.log(`[bsale-docs] Cliente para Bsale:`, { email, firstName, lastName, company });
+    console.log(`[bsale-docs] Cliente para Bsale:`, {
+      email: client.email, firstName: client.firstName, lastName: client.lastName, company: client.company,
+    });
 
     const payload: Record<string, unknown> = {
       ...(isSiiDocument ? { codeSii } : { documentTypeId }),
