@@ -35,9 +35,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (job.status !== "running") return { error: "Job is not in running state" };
 
   // Fire-and-forget: return immediately, process in background Node.js event loop
-  if (job.type === "bsale_prices") {
-    processBsalePricesJob(jobId, shopId).catch((err) =>
-      console.error("[api.bsale.sync] bsale_prices:", err),
+  if (job.type === "bsale_prices" || job.type === "bsale_prices_preview") {
+    const preview = job.type === "bsale_prices_preview";
+    processBsalePricesJob(jobId, shopId, { preview }).catch((err) =>
+      console.error(`[api.bsale.sync] ${job.type}:`, err),
     );
   } else if (job.type === "bsale_stock") {
     processBsaleStockJob(jobId, shopId).catch((err) =>

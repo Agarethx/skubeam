@@ -36,12 +36,12 @@
     "all": "Todos los SKUs",
     "unpublished": "Sin publicar",
     "publish": "Publicar",
-    "published": "✓ Publicado",
+    "published": "✓ Borrador creado",
     "publishAll": "Publicar todos",
     "publishSelected": "Publicar seleccionados",
     "exportCsv": "Exportar CSV",
     "noSkus": "No hay SKUs registrados",
-    "unpublishedBanner": "Busca productos en Bsale por SKU o nombre y publícalos directo en Shopify — no se importa el catálogo completo, solo lo que buscas."
+    "unpublishedBanner": "Busca productos en Bsale por SKU o nombre y publícalos directo en Shopify — no se importa el catálogo completo, solo lo que buscas. Se crean como borrador (inactivos): agrégales las imágenes y la descripción en Shopify y actívalos cuando estén listos."
   },
   "forecast": {
     "title": "Forecast & Reposición",

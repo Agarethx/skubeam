@@ -381,7 +381,10 @@ async function handleBulkPublish(
           body: JSON.stringify({
             product: {
               title:    sku.title || sku.sku_code,
-              status:   "active",
+              // Borrador: el producto llega sin imágenes ni descripción desde Bsale,
+              // así que no debe quedar visible en la tienda. Mismo criterio que
+              // publishSkuToShopify — el merchant lo activa cuando lo completa.
+              status:   "draft",
               ...(sku.vendor ? { vendor: sku.vendor } : {}),
               variants: [{
                 sku:     sku.sku_code,

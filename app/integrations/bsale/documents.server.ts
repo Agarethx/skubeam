@@ -1,4 +1,4 @@
-import { post } from "./client.server";
+import { get, post } from "./client.server";
 import { supabaseAdmin } from "../../db.server";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -246,6 +246,9 @@ export async function emitBoleta(
       .from("bsale_documents")
       .update({
         bsale_document_id: response.id,
+        // `number` es el correlativo impreso en el PDF ("Nº 7718"), que es por el que
+        // el merchant busca. `id` es el identificador interno de la API de Bsale.
+        bsale_document_number: response.number ?? null,
         status:            "emitted",
         url_pdf:           response.urlPdf ?? null,
         total_amount:      response.totalAmount ?? null,
@@ -268,4 +271,139 @@ export async function emitBoleta(
     // Re-throw so the worker marks the job as "error" instead of "completed"
     throw error;
   }
+}
+
+// ── Listado paginado de documentos emitidos (UI de integración) ──────────────
+
+export const BSALE_DOCS_PAGE_SIZE = 20;
+
+export interface BsaleDocumentRow {
+  shopify_order_id:      string;
+  bsale_document_id:     number | null;
+  /** Correlativo impreso en el PDF ("Nº 7718") — lo que el merchant reconoce. */
+  bsale_document_number: number | null;
+  status:                string | null;
+  url_pdf:               string | null;
+  total_amount:          number | null;
+  error_message:         string | null;
+  created_at:            string | null;
+}
+
+export interface BsaleDocumentsPage {
+  items:    BsaleDocumentRow[];
+  total:    number;
+  page:     number;
+  pageSize: number;
+}
+
+/**
+ * PostgREST parsea `or=(...)` con comas y paréntesis como sintaxis, así que
+ * cualquiera de esos caracteres en el término de búsqueda rompería el filtro.
+ * Los comodines de LIKE también se escapan para que un `%` se busque literal.
+ */
+function sanitizeSearch(raw: string): string {
+  return raw.replace(/[(),*]/g, "").replace(/[%_]/g, "").trim();
+}
+
+/**
+ * Los documentos emitidos antes de que se guardara `bsale_document_number` solo
+ * tienen el ID interno. Se resuelve el correlativo contra Bsale la primera vez que
+ * la fila aparece en pantalla y se persiste, así que es un costo único y acotado
+ * al tamaño de la página. Falla en silencio: sin número la fila igual se muestra.
+ */
+async function backfillDocumentNumbers(
+  shopId: string,
+  rows:   BsaleDocumentRow[],
+): Promise<BsaleDocumentRow[]> {
+  const pending = rows.filter((r) => r.bsale_document_id != null && r.bsale_document_number == null);
+  if (pending.length === 0) return rows;
+
+  try {
+    const { data: shop } = await supabaseAdmin
+      .from("shops")
+      .select("bsale_token")
+      .eq("shop_id", shopId)
+      .single();
+
+    const token = shop?.bsale_token ?? process.env.BSALE_ACCESS_TOKEN;
+    if (!token) return rows;
+
+    const resolved = new Map<number, number>(); // documentId → number
+    const CONCURRENCY = 5;
+    for (let i = 0; i < pending.length; i += CONCURRENCY) {
+      const batch = pending.slice(i, i + CONCURRENCY);
+      await Promise.all(batch.map(async (row) => {
+        try {
+          const doc = await get<{ number?: number }>(`/documents/${row.bsale_document_id}.json`, token);
+          if (doc?.number != null) resolved.set(row.bsale_document_id!, doc.number);
+        } catch (err) {
+          console.warn(`[bsale-docs] no se pudo resolver el nº del documento ${row.bsale_document_id}:`, String(err));
+        }
+      }));
+    }
+
+    if (resolved.size === 0) return rows;
+
+    await Promise.all([...resolved.entries()].map(([docId, number]) =>
+      supabaseAdmin
+        .from("bsale_documents")
+        .update({ bsale_document_number: number })
+        .eq("shop_id", shopId)
+        .eq("bsale_document_id", docId),
+    ));
+
+    console.log(`[bsale-docs] backfill de nº de documento: ${resolved.size}/${pending.length}`);
+
+    return rows.map((r) =>
+      r.bsale_document_id != null && resolved.has(r.bsale_document_id)
+        ? { ...r, bsale_document_number: resolved.get(r.bsale_document_id)! }
+        : r,
+    );
+  } catch (err) {
+    console.warn("[bsale-docs] backfill de nº de documento falló:", String(err));
+    return rows;
+  }
+}
+
+export async function getBsaleDocumentsPage(
+  shopId: string,
+  opts:   { q?: string; page?: number } = {},
+): Promise<BsaleDocumentsPage> {
+  const page  = Math.max(1, Math.floor(opts.page ?? 1));
+  const from  = (page - 1) * BSALE_DOCS_PAGE_SIZE;
+  const query = sanitizeSearch(opts.q ?? "");
+
+  let request = supabaseAdmin
+    .from("bsale_documents")
+    .select(
+      "shopify_order_id, bsale_document_id, bsale_document_number, status, url_pdf, total_amount, error_message, created_at",
+      { count: "exact" },
+    )
+    .eq("shop_id", shopId);
+
+  if (query) {
+    // shopify_order_id es texto → ilike parcial. Los dos identificadores de Bsale son
+    // integer, así que solo se comparan por igualdad y si el término es numérico.
+    const clauses = [`shopify_order_id.ilike.%${query}%`];
+    if (/^\d+$/.test(query)) {
+      clauses.push(`bsale_document_number.eq.${query}`);
+      clauses.push(`bsale_document_id.eq.${query}`);
+    }
+    request = request.or(clauses.join(","));
+  }
+
+  const { data, count, error } = await request
+    .order("created_at", { ascending: false })
+    .range(from, from + BSALE_DOCS_PAGE_SIZE - 1);
+
+  if (error) throw new Error(`[getBsaleDocumentsPage] ${error.message}`);
+
+  const items = await backfillDocumentNumbers(shopId, (data ?? []) as BsaleDocumentRow[]);
+
+  return {
+    items,
+    total:    count ?? 0,
+    page,
+    pageSize: BSALE_DOCS_PAGE_SIZE,
+  };
 }

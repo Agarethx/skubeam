@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
 import type { StockSyncResult, StockSyncItemDetail } from "../integrations/bsale/stocks.server";
-import type { PriceSyncResult, PriceSyncItemDetail } from "../integrations/bsale/products.server";
+import type { PriceSyncResult, PriceSyncItemDetail, PriceSyncDiscountSkip } from "../integrations/bsale/products.server";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useEffect, useRef, useState } from "react";
 
@@ -28,10 +28,22 @@ import {
   getLastCompletedSyncJob,
   startBulkSync,
 } from "../models/sync.server";
+import { getBsaleDocumentsPage } from "../integrations/bsale/documents.server";
+import type { BsaleDocumentsPage, BsaleDocumentRow } from "../integrations/bsale/documents.server";
 import type { ProductSyncSummary } from "../models/sync.server";
 import type { Tables } from "../types/supabase";
 
 type SyncJob = Tables<"sync_jobs">;
+
+/** Una vista previa está "pendiente" mientras no haya un sync aplicado posterior. */
+function pricePreviewIsPending(
+  previewAt: string | null | undefined,
+  appliedAt: string | null | undefined,
+): boolean {
+  if (!previewAt) return false;
+  if (!appliedAt) return true;
+  return new Date(previewAt).getTime() > new Date(appliedAt).getTime();
+}
 
 // ── Loader ────────────────────────────────────────────────────────────────────
 
@@ -39,7 +51,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shopId = session.shop;
 
-  const [shopRow, activeJob, recentBoletas, lastStockJob, lastPriceJob, activeProductSyncJob, lastProductSyncJob] = await Promise.all([
+  const [shopRow, activeJob, initialDocuments, lastStockJob, lastPriceJob, lastPricePreviewJob, activeProductSyncJob, lastProductSyncJob] = await Promise.all([
     supabaseAdmin
       .from("shops")
       .select("bsale_token, bsale_last_sync, active_addons, bsale_price_list_id, bsale_office_id, bsale_document_type_id, bsale_document_code_sii")
@@ -47,13 +59,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .single()
       .then(({ data }) => data),
     getActiveBsaleJob(shopId),
-    supabaseAdmin
-      .from("bsale_documents")
-      .select("shopify_order_id, bsale_document_id, status, url_pdf, total_amount, created_at")
-      .eq("shop_id", shopId)
-      .order("created_at", { ascending: false })
-      .limit(5)
-      .then(({ data }) => data ?? []),
+    getBsaleDocumentsPage(shopId),
     supabaseAdmin
       .from("sync_jobs")
       .select("id, records_processed, completed_at, payload")
@@ -69,6 +75,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .select("id, records_processed, completed_at, payload")
       .eq("shop_id", shopId)
       .eq("type", "bsale_prices")
+      .eq("status", "completed")
+      .order("completed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(({ data }) => data),
+    supabaseAdmin
+      .from("sync_jobs")
+      .select("id, records_processed, completed_at, payload")
+      .eq("shop_id", shopId)
+      .eq("type", "bsale_prices_preview")
       .eq("status", "completed")
       .order("completed_at", { ascending: false })
       .limit(1)
@@ -107,7 +123,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     bsaleLastSync:  shopRow?.bsale_last_sync ?? null,
     activeJob,
     hasAddon,
-    recentBoletas,
+    initialDocuments,
     priceLists,
     offices,
     documentTypes,
@@ -115,6 +131,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     lastStockSyncAt: lastStockJob?.completed_at ?? null,
     lastPriceSync:  lastPriceJob?.payload as PriceSyncPayload | null ?? null,
     lastPriceSyncAt: lastPriceJob?.completed_at ?? null,
+    // La vista previa solo se muestra mientras sea más reciente que el último sync
+    // aplicado — al aplicar, el job de "apply" queda arriba y la tarjeta desaparece.
+    lastPricePreview: pricePreviewIsPending(lastPricePreviewJob?.completed_at, lastPriceJob?.completed_at)
+      ? (lastPricePreviewJob!.payload as PriceSyncPayload | null) ?? null
+      : null,
+    lastPricePreviewAt: lastPricePreviewJob?.completed_at ?? null,
     activeProductSyncJob: activeProductSyncJob as SyncJob | null,
     lastProductSync: lastProductSyncJob
       ? {
@@ -207,6 +229,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (!shop?.bsale_token && !process.env.BSALE_ACCESS_TOKEN)
     return { error: "Configura el access token de Bsale antes de sincronizar." };
 
+  if (intent === "preview_prices") {
+    const job = await createBsaleJob(shopId, "bsale_prices_preview");
+    return { jobId: job.id, jobType: "bsale_prices_preview" as const };
+  }
   if (intent === "sync_prices") {
     const job = await createBsaleJob(shopId, "bsale_prices");
     return { jobId: job.id, jobType: "bsale_prices" as const };
@@ -268,9 +294,38 @@ function formatDate(iso: string | null) {
 }
 
 function jobTypeLabel(type: string | null | undefined) {
-  if (type === "bsale_prices") return "precios (Bsale)";
-  if (type === "bsale_stock")  return "stock (Bsale)";
+  if (type === "bsale_prices")         return "precios (Bsale)";
+  if (type === "bsale_prices_preview") return "vista previa de precios (Bsale)";
+  if (type === "bsale_stock")          return "stock (Bsale)";
   return "datos";
+}
+
+type BsaleTab = "config" | "productos" | "stock" | "precios" | "documentos";
+
+const TABS: Array<{ id: BsaleTab; label: string }> = [
+  { id: "config",     label: "Configuración" },
+  { id: "productos",  label: "Última sincronización" },
+  { id: "stock",      label: "Stock" },
+  { id: "precios",    label: "Precios" },
+  { id: "documentos", label: "Notas emitidas" },
+];
+
+const TAB_STYLE = (active: boolean): React.CSSProperties => ({
+  padding:      "8px 16px",
+  cursor:       "pointer",
+  fontWeight:   active ? 600 : 400,
+  borderBottom: active ? "2px solid var(--p-color-text, #202223)" : "2px solid transparent",
+  borderTop:    "none",
+  borderLeft:   "none",
+  borderRight:  "none",
+  color:        active ? "var(--p-color-text, #202223)" : "var(--p-color-text-subdued, #6d7175)",
+  background:   "none",
+  fontSize:     "var(--p-font-size-350, 0.875rem)",
+});
+
+function formatCLP(value: number | null | undefined) {
+  if (value == null) return "—";
+  return `$${Math.round(value).toLocaleString("es-CL")}`;
 }
 
 const INPUT_STYLE: React.CSSProperties = {
@@ -455,6 +510,304 @@ function SkippedTable({
   );
 }
 
+/**
+ * Variantes con oferta activa en Shopify (compareAtPrice > price). El sync de
+ * precios nunca las toca — escribir el precio de lista de Bsale encima las sacaría
+ * de oferta — así que se listan aquí para que el merchant decida caso a caso.
+ */
+function DiscountSkippedTable({ items }: { items: PriceSyncDiscountSkip[] }) {
+  const [open, setOpen] = useState(false);
+  const [page, setPage] = useState(1);
+  const totalPages      = Math.ceil(items.length / PAGE_SIZE_SKIPPED);
+  const slice           = items.slice((page - 1) * PAGE_SIZE_SKIPPED, page * PAGE_SIZE_SKIPPED);
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+        <s-stack direction="block" gap="small">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <p style={{ ...HEADING_STYLE, color: "var(--p-color-text-caution, #b98900)" }}>
+                Con descuento activo — precio no modificado
+              </p>
+              <s-badge tone="warning">{items.length}</s-badge>
+            </div>
+            <s-button variant="tertiary" onClick={() => setOpen((v) => !v)}>
+              {open ? "Ocultar ▲" : "Ver listado ▼"}
+            </s-button>
+          </div>
+
+          {open && (
+            <>
+              <s-text color="subdued">
+                Estos productos están en oferta en Shopify (precio rebajado con precio de comparación tachado).
+                El sync no los toca para no cancelar la promoción. Si quieres aplicarles el precio de Bsale,
+                quita la oferta en Shopify y vuelve a sincronizar.
+              </s-text>
+
+              <SimpleTable
+                cols={["SKU", "Título", "Precio oferta", "Precio tachado", "Precio Bsale"]}
+                rows={slice.map((item) => [
+                  <span key="sku"   style={{ fontFamily: "monospace", fontWeight: 600 }}>{item.sku_code}</span>,
+                  <span key="title" style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>{item.title ?? "—"}</span>,
+                  <span key="price" style={{ textAlign: "right" as const, display: "block", fontWeight: 600 }}>
+                    {formatCLP(item.price_shopify)}
+                  </span>,
+                  <span key="compare" style={{ textAlign: "right" as const, display: "block", textDecoration: "line-through", color: "var(--p-color-text-subdued, #6d7175)" }}>
+                    {formatCLP(item.compare_at_price)}
+                  </span>,
+                  <span key="bsale" style={{ textAlign: "right" as const, display: "block", color: "var(--p-color-text-subdued, #6d7175)" }}>
+                    {formatCLP(item.price_bsale)}
+                  </span>,
+                ])}
+              />
+
+              {totalPages > 1 && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 8 }}>
+                  <s-text color="subdued">
+                    {(page - 1) * PAGE_SIZE_SKIPPED + 1}–{Math.min(page * PAGE_SIZE_SKIPPED, items.length)} de {items.length}
+                  </s-text>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <s-button
+                      variant="tertiary"
+                      {...(page <= 1 ? { disabled: true } : {})}
+                      onClick={(e: Event) => { e.stopPropagation(); setPage(page - 1); }}
+                    >
+                      ← Anterior
+                    </s-button>
+                    <s-button
+                      variant="tertiary"
+                      {...(page >= totalPages ? { disabled: true } : {})}
+                      onClick={(e: Event) => { e.stopPropagation(); setPage(page + 1); }}
+                    >
+                      Siguiente →
+                    </s-button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </s-stack>
+      </s-box>
+    </div>
+  );
+}
+
+/**
+ * Listado completo de documentos emitidos, con búsqueda por orden / nº de documento
+ * y paginación server-side (`/api/bsale/documents`). La primera página llega en el
+ * loader; a partir de ahí manda el fetcher, para no re-ejecutar el loader de la
+ * página completa (que además consulta listas de precios y sucursales en Bsale).
+ */
+function BsaleDocumentsTable({ initial }: { initial: BsaleDocumentsPage }) {
+  const fetcher = useFetcher<BsaleDocumentsPage>();
+
+  const [search, setSearch]   = useState("");
+  const [page, setPage]       = useState(1);
+  const [touched, setTouched] = useState(false);
+
+  // Debounce: escribir en el buscador no dispara una request por tecla.
+  useEffect(() => {
+    if (!touched) return;
+    const id = setTimeout(() => {
+      const params = new URLSearchParams({ page: String(page) });
+      if (search.trim()) params.set("q", search.trim());
+      fetcher.load(`/api/bsale/documents?${params}`);
+    }, 300);
+    return () => clearTimeout(id);
+  }, [search, page, touched]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const data      = touched && fetcher.data ? fetcher.data : initial;
+  const items     = data.items;
+  const total     = data.total;
+  const pageSize  = data.pageSize;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const isLoading = fetcher.state !== "idle";
+
+  const changeSearch = (value: string) => { setTouched(true); setPage(1); setSearch(value); };
+  const changePage   = (next: number) => { setTouched(true); setPage(next); };
+
+  const GRID = "110px 1fr 110px 110px 90px 50px";
+
+  return (
+    <s-stack direction="block" gap="base">
+      <p style={HEADING_STYLE}>Documentos emitidos</p>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ maxWidth: 320, flex: "1 1 240px" }}>
+          <label style={{ display: "block" }}>
+            <span style={LABEL_STYLE}>Buscar por orden o nº de documento</span>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => changeSearch(e.target.value)}
+              placeholder="Ej: 7180507807893 o 7718"
+              style={INPUT_STYLE}
+            />
+          </label>
+        </div>
+        <s-text color="subdued">
+          {isLoading
+            ? "Buscando…"
+            : total === 0
+            ? "Sin resultados"
+            : `${total.toLocaleString("es-CL")} ${total === 1 ? "documento" : "documentos"}`}
+        </s-text>
+      </div>
+
+      {items.length === 0 ? (
+        <s-text color="subdued">
+          {search.trim()
+            ? `No hay documentos que coincidan con "${search.trim()}".`
+            : "Aún no hay Notas de Venta emitidas."}
+        </s-text>
+      ) : (
+        <div
+          style={{
+            border:       "1px solid var(--p-color-border, #e1e3e5)",
+            borderRadius: "var(--p-border-radius-200, 8px)",
+            overflow:     "hidden",
+            opacity:      isLoading ? 0.6 : 1,
+          }}
+        >
+          <div
+            style={{
+              display:             "grid",
+              gridTemplateColumns: GRID,
+              gap:                 8,
+              padding:             "8px 12px",
+              background:          "var(--p-color-bg-surface-secondary, #f6f6f7)",
+              borderBottom:        "1px solid var(--p-color-border, #e1e3e5)",
+              fontSize:            "var(--p-font-size-300, 0.75rem)",
+              fontWeight:          600,
+              color:               "var(--p-color-text-subdued, #6d7175)",
+              textTransform:       "uppercase",
+              letterSpacing:       "0.04em",
+            }}
+          >
+            <span>Fecha</span>
+            <span>Orden Shopify</span>
+            <span>Nº documento</span>
+            <span>Total</span>
+            <span>Estado</span>
+            <span>PDF</span>
+          </div>
+
+          {items.map((doc, idx) => (
+            <div
+              key={doc.shopify_order_id}
+              style={{
+                display:             "grid",
+                gridTemplateColumns: GRID,
+                gap:                 8,
+                padding:             "10px 12px",
+                alignItems:          "center",
+                background:          idx % 2 === 0
+                  ? "var(--p-color-bg-surface, #fff)"
+                  : "var(--p-color-bg-surface-secondary, #f6f6f7)",
+                borderBottom: idx < items.length - 1
+                  ? "1px solid var(--p-color-border-subdued, #e1e3e5)"
+                  : "none",
+                fontSize: "var(--p-font-size-350, 0.875rem)",
+              }}
+            >
+              <span style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>
+                {doc.created_at
+                  ? new Intl.DateTimeFormat("es-CL", { day: "2-digit", month: "2-digit", year: "2-digit" }).format(new Date(doc.created_at))
+                  : "—"}
+              </span>
+              <span style={{ fontWeight: 600 }}>#{doc.shopify_order_id}</span>
+              {/* El correlativo impreso en el PDF; el ID interno de la API solo
+                  aparece como fallback si Bsale todavía no devolvió el número. */}
+              <span style={{ fontFamily: "monospace", fontWeight: 600 }}>
+                {doc.bsale_document_number != null
+                  ? `Nº ${doc.bsale_document_number}`
+                  : doc.bsale_document_id != null
+                    ? <span title="Documento sin número correlativo devuelto por Bsale" style={{ fontWeight: 400, color: "var(--p-color-text-subdued, #6d7175)" }}>
+                        ID {doc.bsale_document_id}
+                      </span>
+                    : "—"}
+              </span>
+              <span>
+                {doc.total_amount != null
+                  ? new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP" }).format(Number(doc.total_amount))
+                  : "—"}
+              </span>
+              <span>
+                <s-badge
+                  tone={
+                    doc.status === "emitted" ? "success"
+                    : doc.status === "error"  ? "critical"
+                    : "warning"
+                  }
+                >
+                  {doc.status === "emitted" ? "Emitida"
+                    : doc.status === "error" ? "Error"
+                    : "Pendiente"}
+                </s-badge>
+              </span>
+              <span>
+                {doc.url_pdf ? (
+                  <a href={doc.url_pdf} target="_blank" rel="noreferrer"
+                    style={{ color: "var(--p-color-text-emphasis, #005bd3)" }}>
+                    Ver
+                  </a>
+                ) : (
+                  <span style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>—</span>
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {totalPages > 1 && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <s-text color="subdued">
+            {(data.page - 1) * pageSize + 1}–{Math.min(data.page * pageSize, total)} de {total.toLocaleString("es-CL")}
+          </s-text>
+          <div style={{ display: "flex", gap: 8 }}>
+            <s-button
+              variant="tertiary"
+              {...(data.page <= 1 || isLoading ? { disabled: true } : {})}
+              onClick={() => changePage(data.page - 1)}
+            >
+              ← Anterior
+            </s-button>
+            <s-button
+              variant="tertiary"
+              {...(data.page >= totalPages || isLoading ? { disabled: true } : {})}
+              onClick={() => changePage(data.page + 1)}
+            >
+              Siguiente →
+            </s-button>
+          </div>
+        </div>
+      )}
+
+      {/* Errores de emisión: el detalle vive solo acá, así que se muestra completo. */}
+      {items.some((d) => d.status === "error" && d.error_message) && (
+        <s-box padding="base" borderWidth="small" borderRadius="base" background="base">
+          <s-stack direction="block" gap="small">
+            <p style={{ ...HEADING_STYLE, color: "var(--p-color-text-critical, #d72c0d)" }}>
+              Detalle de errores en esta página
+            </p>
+            <SimpleTable
+              cols={["Orden", "Error"]}
+              rows={items
+                .filter((d): d is BsaleDocumentRow & { error_message: string } => d.status === "error" && !!d.error_message)
+                .map((d) => [
+                  <span key="order" style={{ fontWeight: 600 }}>#{d.shopify_order_id}</span>,
+                  <span key="err" style={{ color: "var(--p-color-text-critical, #d72c0d)", fontSize: "var(--p-font-size-300, 0.75rem)" }}>{d.error_message}</span>,
+                ])}
+            />
+          </s-stack>
+        </s-box>
+      )}
+    </s-stack>
+  );
+}
+
 function StockDetailTable({
   items,
   page,
@@ -541,10 +894,12 @@ function PriceDetailTable({
   items,
   page,
   onPageChange,
+  mode = "apply",
 }: {
   items:        PriceSyncItemDetail[];
   page:         number;
   onPageChange: (p: number) => void;
+  mode?:        "preview" | "apply";
 }) {
   const totalPages = Math.ceil(items.length / PAGE_SIZE_DETAIL);
   const slice      = items.slice((page - 1) * PAGE_SIZE_DETAIL, page * PAGE_SIZE_DETAIL);
@@ -559,13 +914,13 @@ function PriceDetailTable({
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <p style={HEADING_STYLE}>Detalle por SKU</p>
             <div style={{ display: "flex", gap: 8 }}>
-              {changedCount > 0   && <s-badge tone="success">{changedCount} actualizados</s-badge>}
+              {changedCount > 0   && <s-badge tone="success">{changedCount} {mode === "preview" ? "por actualizar" : "actualizados"}</s-badge>}
               {unchangedCount > 0 && <s-badge tone="neutral">{unchangedCount} sin cambio</s-badge>}
             </div>
           </div>
 
           <SimpleTable
-            cols={["SKU", "Título", "Precio Shopify", "Precio Bsale", "Cambio"]}
+            cols={["SKU", "Título", "Precio Shopify", "Precio Bsale", mode === "preview" ? "Cambio propuesto" : "Cambio"]}
             rows={slice.map((item) => {
               const before  = item.price_before;
               const diff    = before != null ? item.price_after - before : null;
@@ -695,10 +1050,11 @@ export default function BsaleIntegrationPage() {
   const {
     hasToken, hasPriceList, hasOffice, isFullyConfigured,
     priceListId, officeId, documentTypeId, documentCodeSii,
-    bsaleLastSync, activeJob, hasAddon, recentBoletas,
+    bsaleLastSync, activeJob, hasAddon, initialDocuments,
     priceLists, offices, documentTypes,
     lastStockSync, lastStockSyncAt,
     lastPriceSync, lastPriceSyncAt,
+    lastPricePreview, lastPricePreviewAt,
     activeProductSyncJob, lastProductSync,
   } = useLoaderData<typeof loader>();
 
@@ -718,14 +1074,19 @@ export default function BsaleIntegrationPage() {
   const [stockSearch,          setStockSearch]          = useState("");
   const [priceDetailPage,      setPriceDetailPage]      = useState(1);
   const [priceSearch,          setPriceSearch]          = useState("");
+  const [previewDetailPage,    setPreviewDetailPage]    = useState(1);
+  const [previewSearch,        setPreviewSearch]        = useState("");
+  const [showOldPriceReport,   setShowOldPriceReport]   = useState(false);
+  const [tab,                  setTab]                  = useState<BsaleTab>("config");
 
   // Fetchers
   const tokenFetcher   = useFetcher<{ success?: string; error?: string; tokenSaved?: boolean }>();
   const webhookFetcher = useFetcher<{ success?: string; error?: string }>();
   const setupFetcher   = useFetcher<{ ok?: boolean }>();
-  const createFetcher  = useFetcher<{ jobId?: string; jobType?: "bsale_prices" | "bsale_stock"; error?: string; success?: string }>();
+  const createFetcher  = useFetcher<{ jobId?: string; jobType?: "bsale_prices" | "bsale_prices_preview" | "bsale_stock"; error?: string; success?: string }>();
   const triggerFetcher = useFetcher();
-  const statusFetcher  = useFetcher<{ status: string | null; records_processed: number; type: string | null }>();
+  const statusFetcher  = useFetcher<{ status: string | null; records_processed: number; type: string | null; error_message: string | null }>();
+  const cancelFetcher  = useFetcher<{ ok?: boolean; error?: string }>();
 
   const pollRef         = useRef<ReturnType<typeof setInterval> | null>(null);
   const triggeredJobRef = useRef<string | null>(null);
@@ -743,11 +1104,13 @@ export default function BsaleIntegrationPage() {
     }
   }, [setupFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync polling
+  // Sync polling. "cancelled" también es terminal: sin él, cancelar un job dejaba
+  // los tres botones girando para siempre.
+  const TERMINAL_STATUSES = ["completed", "failed", "cancelled"];
   const pendingJobId = createFetcher.data?.jobId ?? null;
   const jobId        = pendingJobId ?? activeJob?.id ?? null;
   const polledStatus = statusFetcher.data?.status;
-  const isRunning    = !!jobId && polledStatus !== "completed" && polledStatus !== "failed";
+  const isRunning    = !!jobId && !TERMINAL_STATUSES.includes(polledStatus ?? "");
 
   useEffect(() => {
     if (!pendingJobId || triggeredJobRef.current === pendingJobId) return;
@@ -762,13 +1125,53 @@ export default function BsaleIntegrationPage() {
   }, [jobId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (polledStatus === "completed" || polledStatus === "failed") {
+    if (TERMINAL_STATUSES.includes(polledStatus ?? "")) {
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
       revalidator.revalidate();
       // After first sync completes from step 4, exit wizard
       if (step === 4) setShowWizard(false);
+
+      // Llevar al tab con el resultado recién generado — si no, el reporte queda
+      // en un tab que el merchant no está mirando.
+      if (polledStatus === "completed") {
+        const finished = statusFetcher.data?.type;
+        if (finished === "bsale_stock") setTab("stock");
+        else if (finished === "bsale_prices" || finished === "bsale_prices_preview") setTab("precios");
+      }
     }
   }, [polledStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Cancelar un job colgado: devuelve el control sin esperar el corte por antigüedad.
+  useEffect(() => {
+    if (cancelFetcher.data?.ok) revalidator.revalidate();
+  }, [cancelFetcher.data]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Cronómetro del job en curso — un spinner sin tiempo ni avance no permite
+  // distinguir "va lento" de "murió", que es exactamente lo que confunde acá.
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [tick, setTick]                 = useState(0);
+
+  useEffect(() => {
+    if (!isRunning) { setRunStartedAt(null); setTick(0); return; }
+    setRunStartedAt((prev) => prev ?? (activeJob?.started_at ? new Date(activeJob.started_at).getTime() : Date.now()));
+    const id = setInterval(() => setTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isRunning]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Badges de los tabs: solo lo accionable (cambios de precio esperando confirmación)
+  // y el total de documentos, para no llenar la barra de números sin uso.
+  const pendingPriceChanges = lastPricePreview?.items.filter((i) => i.changed).length ?? 0;
+  const tabBadges: Partial<Record<BsaleTab, { value: number | string; tone?: "attention" }>> = {
+    ...(pendingPriceChanges > 0 ? { precios: { value: pendingPriceChanges, tone: "attention" as const } } : {}),
+    ...(initialDocuments.total > 0 ? { documentos: { value: initialDocuments.total } } : {}),
+  };
+
+  const elapsedLabel = runStartedAt && tick
+    ? (() => {
+        const s = Math.max(0, Math.floor((tick - runStartedAt) / 1000));
+        return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+      })()
+    : null;
 
   // ── Shopify product sync (bulk operation) — separate poll target: /api/sync
   // advances Shopify's own async bulk op, unlike the jobId-based Bsale polling above.
@@ -815,6 +1218,7 @@ export default function BsaleIntegrationPage() {
     const isDone = !job || job.status === "completed" || job.status === "failed" || job.status === "cancelled";
     if (isDone) {
       if (productSyncPollRef.current) { clearInterval(productSyncPollRef.current); productSyncPollRef.current = null; }
+      if (trackedJobId && job?.status === "completed") setTab("productos");
       setTrackedJobId(null);
       revalidator.revalidate();
     }
@@ -832,7 +1236,10 @@ export default function BsaleIntegrationPage() {
     webhookFetcher.data?.error ??
     createFetcher.data?.error ??
     productSyncFetcher.data?.error ??
-    (polledStatus === "failed" ? "La sincronización falló. Revisa los logs." : null) ??
+    (polledStatus === "failed"
+      ? statusFetcher.data?.error_message ?? "La sincronización falló. Revisa los logs."
+      : null) ??
+    (polledStatus === "cancelled" ? "Sincronización cancelada." : null) ??
     (polledProductSyncJob?.status === "failed"
       ? `Sincronización de productos Shopify falló: ${polledProductSyncJob.error_message ?? "error desconocido"}`
       : null);
@@ -1112,7 +1519,82 @@ export default function BsaleIntegrationPage() {
             </s-grid>
           </s-section>
 
+          {/* Sync en curso — fuera de los tabs para que se vea desde cualquiera */}
+          {(isRunning || isProductSyncRunning) && (
+            <s-section>
+              <s-stack direction="block" gap="base">
+                {isRunning && (
+                  <s-banner tone="info">
+                    <s-stack direction="block" gap="small">
+                      <s-stack direction="inline" gap="small">
+                        <s-spinner />
+                        <s-text>
+                          Sincronizando {jobTypeLabel(runningType)}{progressLabel}
+                          {elapsedLabel ? ` — ${elapsedLabel}` : ""}…
+                        </s-text>
+                      </s-stack>
+                      <s-text color="subdued">
+                        Solo puede correr un sync de Bsale a la vez, por eso los botones están
+                        deshabilitados. El contador de registros avanza mientras lee la lista de
+                        precios de Bsale; si se queda pegado en 0 más de un minuto, cancela y reintenta.
+                      </s-text>
+                      {jobId && (
+                        <s-button
+                          variant="tertiary"
+                          {...(cancelFetcher.state !== "idle" ? { loading: true } : {})}
+                          onClick={() =>
+                            cancelFetcher.submit({ jobId }, { method: "post", action: "/api/cancel-job" })
+                          }
+                        >
+                          Cancelar
+                        </s-button>
+                      )}
+                    </s-stack>
+                  </s-banner>
+                )}
+
+                {isProductSyncRunning && (
+                  <s-banner tone="info">
+                    <s-stack direction="inline" gap="small">
+                      <s-spinner />
+                      <s-text>Sincronizando catálogo desde Shopify{productSyncProgress}… puede tardar varios minutos.</s-text>
+                    </s-stack>
+                  </s-banner>
+                )}
+              </s-stack>
+            </s-section>
+          )}
+
+          {/* Tabs */}
+          <s-section>
+            <div style={{ display: "flex", gap: 4, borderBottom: "1px solid var(--p-color-border, #e1e3e5)", flexWrap: "wrap" }}>
+              {TABS.map(({ id, label }) => {
+                const badge = tabBadges[id];
+                return (
+                  <button key={id} style={TAB_STYLE(tab === id)} onClick={() => setTab(id)}>
+                    {label}
+                    {badge != null && (
+                      <span style={{
+                        marginLeft: 6,
+                        padding:      "1px 6px",
+                        borderRadius: 10,
+                        fontSize:     "var(--p-font-size-300, 0.75rem)",
+                        background:   badge.tone === "attention"
+                          ? "var(--p-color-bg-fill-caution, #ffd79d)"
+                          : "var(--p-color-bg-surface-secondary, #f1f1f1)",
+                        color: "var(--p-color-text, #202223)",
+                      }}>
+                        {badge.value}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </s-section>
+
           {/* Config + Sync */}
+          {tab === "config" && (
           <s-section>
             <s-grid gridTemplateColumns="1fr 1fr" gap="base">
 
@@ -1176,24 +1658,6 @@ export default function BsaleIntegrationPage() {
                     <s-banner tone="warning" heading="Configura el access token antes de sincronizar." />
                   )}
 
-                  {isRunning && (
-                    <s-banner tone="info">
-                      <s-stack direction="inline" gap="small">
-                        <s-spinner />
-                        <s-text>Sincronizando {jobTypeLabel(runningType)}{progressLabel}…</s-text>
-                      </s-stack>
-                    </s-banner>
-                  )}
-
-                  {isProductSyncRunning && (
-                    <s-banner tone="info">
-                      <s-stack direction="inline" gap="small">
-                        <s-spinner />
-                        <s-text>Sincronizando catálogo desde Shopify{productSyncProgress}… puede tardar varios minutos.</s-text>
-                      </s-stack>
-                    </s-banner>
-                  )}
-
                   <s-stack direction="block" gap="small">
                     <s-text type="strong">Productos (Shopify)</s-text>
                     <s-text color="subdued">
@@ -1216,15 +1680,22 @@ export default function BsaleIntegrationPage() {
 
                   <s-stack direction="block" gap="small">
                     <s-text type="strong">Precios (Bsale)</s-text>
-                    <s-text color="subdued">Trae los precios actuales desde la lista de precios configurada y los actualiza en Shopify — solo para productos ya publicados.</s-text>
+                    <s-text color="subdued">
+                      Trae los precios de la lista configurada en Bsale y los escribe en Shopify — solo precio,
+                      nunca stock, y solo para productos ya publicados. Los productos con descuento activo
+                      (precio de comparación tachado) se omiten para no cancelar la promoción.
+                    </s-text>
+                    <s-text color="subdued">
+                      Primero calcula los cambios y te los muestra; nada se escribe en Shopify hasta que confirmes.
+                    </s-text>
                     <createFetcher.Form method="post">
-                      <input type="hidden" name="intent" value="sync_prices" />
+                      <input type="hidden" name="intent" value="preview_prices" />
                       <s-button
                         type="submit"
                         {...(isRunning || createFetcher.state !== "idle" ? { loading: true } : {})}
                         {...(!hasToken ? { disabled: true } : {})}
                       >
-                        Sincronizar precios
+                        Revisar cambios de precio
                       </s-button>
                     </createFetcher.Form>
                   </s-stack>
@@ -1233,7 +1704,7 @@ export default function BsaleIntegrationPage() {
 
                   <s-stack direction="block" gap="small">
                     <s-text type="strong">Stock (Bsale)</s-text>
-                    <s-text color="subdued">Actualiza los niveles de inventario por sucursal.</s-text>
+                    <s-text color="subdued">Actualiza los niveles de inventario por sucursal. No modifica precios.</s-text>
                     <createFetcher.Form method="post">
                       <input type="hidden" name="intent" value="sync_stock" />
                       <s-button
@@ -1251,9 +1722,17 @@ export default function BsaleIntegrationPage() {
 
             </s-grid>
           </s-section>
+          )}
 
-          {/* ── Última sincronización de productos (Shopify) ─────────────── */}
-          {lastProductSync && (() => {
+          {/* ── Tab: última sincronización de productos (Shopify) ─────────── */}
+          {tab === "productos" && !lastProductSync && (
+            <s-section heading="Última sincronización de productos (Shopify)">
+              <s-text color="subdued">
+                Todavía no has sincronizado el catálogo desde Shopify. Hazlo desde Configuración → Sincronización manual.
+              </s-text>
+            </s-section>
+          )}
+          {tab === "productos" && lastProductSync && (() => {
             const summary   = lastProductSync.summary;
             const total     = summary?.records_total ?? lastProductSync.recordsProcessed;
             const skipped   = (summary?.skipped ?? []) as SkuSyncIssue[];
@@ -1347,8 +1826,15 @@ export default function BsaleIntegrationPage() {
             );
           })()}
 
-          {/* ── Último sync de stock ─────────────────────────────────────── */}
-          {lastStockSync && (
+          {/* ── Tab: stock ───────────────────────────────────────────────── */}
+          {tab === "stock" && !lastStockSync && (
+            <s-section heading="Stock (Bsale)">
+              <s-text color="subdued">
+                Todavía no has sincronizado stock desde Bsale. Hazlo desde Configuración → Sincronización manual.
+              </s-text>
+            </s-section>
+          )}
+          {tab === "stock" && lastStockSync && (
             <s-section heading="Último sync de stock">
               {/* Stats row */}
               <s-grid gridTemplateColumns="repeat(auto-fit, minmax(140px, 1fr))" gap="base">
@@ -1460,35 +1946,259 @@ export default function BsaleIntegrationPage() {
             </s-section>
           )}
 
-          {/* ── Último sync de precios ───────────────────────────────────── */}
-          {lastPriceSync && (
-            <s-section heading="Último sync de precios">
+          {/* ── Tab: precios ─────────────────────────────────────────────── */}
+          {tab === "precios" && (
+            <s-section>
+              <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
+                <s-stack direction="block" gap="small">
+                  <p style={HEADING_STYLE}>Cómo funciona</p>
+                  <s-text color="subdued">
+                    <strong>1. Revisar</strong> (botón en Configuración) → compara Bsale con Shopify y te muestra
+                    abajo qué cambiaría. <strong>No escribe nada.</strong>
+                  </s-text>
+                  <s-text color="subdued">
+                    <strong>2. Aplicar</strong> (botón al final de la tarjeta de revisión, aquí abajo) → recién ahí se
+                    escriben los precios en Shopify. Se habilita solo si la revisión encontró diferencias.
+                  </s-text>
+                  <s-text color="subdued">
+                    Por eso las dos tarjetas de abajo tienen fechas distintas: la primera es la última
+                    <strong> revisión</strong> (simulación), la segunda es la última vez que se
+                    <strong> aplicó</strong> algo de verdad.
+                  </s-text>
+                </s-stack>
+              </s-box>
+            </s-section>
+          )}
+
+          {tab === "precios" && !lastPricePreview && !lastPriceSync && (
+            <s-section heading="Precios (Bsale)">
+              <s-text color="subdued">
+                Todavía no has revisado precios. Anda a Configuración → Sincronización manual y dale a
+                &quot;Revisar cambios de precio&quot;: te mostramos el diff acá antes de escribir nada en Shopify.
+              </s-text>
+            </s-section>
+          )}
+
+          {/* Vista previa de precios (pendiente de confirmar) */}
+          {tab === "precios" && lastPricePreview && (() => {
+            const changed    = lastPricePreview.items.filter((i) => i.changed);
+            const discounted = lastPricePreview.discounted_skipped ?? [];
+
+            return (
+              <s-section heading="Última revisión (simulación) — nada escrito en Shopify">
+                <s-stack direction="block" gap="base">
+                  {/* Con `heading` suelto el banner no se renderiza en algunos casos;
+                      con children siempre sale. */}
+                  {changed.length === 0 ? (
+                    <s-banner tone="success">
+                      <s-paragraph>
+                        <strong>Todo alineado: ningún precio cambiaría.</strong> Shopify ya coincide con la
+                        lista de precios de Bsale, así que no hay nada que aplicar.
+                      </s-paragraph>
+                    </s-banner>
+                  ) : (
+                    <s-banner tone="info">
+                      <s-paragraph>
+                        <strong>{changed.length} {changed.length === 1 ? "producto cambiaría" : "productos cambiarían"} de precio.</strong>{" "}
+                        Nada se ha escrito todavía en Shopify — revisa la tabla y confirma abajo.
+                      </s-paragraph>
+                    </s-banner>
+                  )}
+
+                  {/* Una oferta puesta bajando el precio SIN llenar el precio de
+                      comparación es indistinguible de "Bsale subió el precio", así
+                      que no se puede omitir automáticamente — se avisa acá. */}
+                  {(() => {
+                    const subirian = changed.filter((i) => i.price_before != null && i.price_before < i.price_after);
+                    if (subirian.length === 0) return null;
+                    return (
+                      <s-banner tone="warning">
+                        <s-paragraph>
+                          <strong>{subirian.length} {subirian.length === 1 ? "producto tiene" : "productos tienen"} en Shopify un precio menor al de Bsale</strong> y
+                          el sync se lo subiría ({subirian.slice(0, 5).map((i) => i.sku_code).join(", ")}
+                          {subirian.length > 5 ? `, +${subirian.length - 5} más` : ""}).
+                          Si son ofertas que pusiste bajando el precio sin llenar el &quot;precio de comparación&quot;,
+                          aplicar el sync las va a cancelar. Para que SkuBeam las respete automáticamente,
+                          carga el precio normal en el campo de comparación de Shopify.
+                        </s-paragraph>
+                      </s-banner>
+                    );
+                  })()}
+
+                  <s-grid gridTemplateColumns="repeat(auto-fit, minmax(140px, 1fr))" gap="base">
+                    {(
+                      [
+                        { label: "Matcheados con Bsale", value: lastPricePreview.shopify_matched, tone: undefined },
+                        { label: "Cambiarían de precio", value: changed.length, tone: changed.length > 0 ? "success" as const : undefined },
+                        { label: "En oferta (omitidos)", value: discounted.length, tone: discounted.length > 0 ? "warning" as const : undefined },
+                        { label: "No en Bsale",          value: lastPricePreview.skipped, tone: lastPricePreview.skipped > 0 ? "warning" as const : undefined },
+                      ] as Array<{ label: string; value: number; tone?: "success" | "warning" | "critical" }>
+                    ).map(({ label, value, tone }) => (
+                      <s-box key={label} padding="base" borderWidth="small" borderRadius="base" background="base">
+                        <s-stack direction="block" gap="small">
+                          <s-text color="subdued">{label}</s-text>
+                          {tone
+                            ? <s-badge tone={tone}>{value.toLocaleString("es-CL")}</s-badge>
+                            : <p style={{ margin: 0, fontWeight: 600, fontSize: "var(--p-font-size-500, 1.25rem)" }}>{value.toLocaleString("es-CL")}</p>
+                          }
+                        </s-stack>
+                      </s-box>
+                    ))}
+                  </s-grid>
+
+                  <s-text color="subdued">
+                    Revisado el {formatDate(lastPricePreviewAt)} — refleja los precios de Shopify y Bsale en ese momento.
+                  </s-text>
+
+                  {/* Buscador sobre TODO el resultado, no solo sobre lo que cambia:
+                      buscar un SKU y no encontrarlo no distingue "sin cambio" de
+                      "en oferta" o "no está en Bsale", que es justo lo que se
+                      necesita saber. */}
+                  <div style={{ maxWidth: 320 }}>
+                    <label style={{ display: "block" }}>
+                      <span style={LABEL_STYLE}>Buscar SKU en esta vista previa</span>
+                      <input
+                        type="text"
+                        value={previewSearch}
+                        onChange={(e) => { setPreviewSearch(e.target.value); setPreviewDetailPage(1); }}
+                        placeholder="Ej: ANZ411"
+                        style={INPUT_STYLE}
+                      />
+                    </label>
+                  </div>
+
+                  {(() => {
+                    const q = previewSearch.trim().toLowerCase();
+                    const match = (code: string) => code.toLowerCase().includes(q);
+
+                    // Sin búsqueda se muestra solo lo que cambiaría; con búsqueda se
+                    // busca en todo (incluidos los que quedan igual).
+                    const shownItems      = q ? lastPricePreview.items.filter((i) => match(i.sku_code)) : changed;
+                    const shownDiscounted = q ? discounted.filter((d) => match(d.sku_code)) : discounted;
+                    const shownNotInBsale = q ? (lastPricePreview.skipped_items ?? []).filter((i) => match(i.sku_code)) : [];
+                    const nothing = q && shownItems.length === 0 && shownDiscounted.length === 0 && shownNotInBsale.length === 0;
+
+                    return (
+                      <>
+                        {shownItems.length > 0 && (
+                          <PriceDetailTable
+                            items={shownItems}
+                            page={previewDetailPage}
+                            onPageChange={setPreviewDetailPage}
+                            mode="preview"
+                          />
+                        )}
+
+                        {shownDiscounted.length > 0 && <DiscountSkippedTable items={shownDiscounted} />}
+
+                        {shownNotInBsale.length > 0 && (
+                          <s-banner tone="warning">
+                            <s-paragraph>
+                              {shownNotInBsale.map((i) => i.sku_code).join(", ")} no {shownNotInBsale.length === 1 ? "tiene" : "tienen"} código
+                              coincidente en la lista de precios de Bsale, así que el sync no {shownNotInBsale.length === 1 ? "lo" : "los"} toca.
+                            </s-paragraph>
+                          </s-banner>
+                        )}
+
+                        {nothing && (
+                          <s-banner tone="info" heading={`"${previewSearch.trim()}" no aparece en esta vista previa — no es un SKU publicado en Shopify, o está archivado.`} />
+                        )}
+                      </>
+                    );
+                  })()}
+
+                  {/* El botón se muestra siempre — deshabilitado cuando no hay nada que
+                      aplicar. Esconderlo dejaba al merchant buscando un botón inexistente. */}
+                  <div style={{ borderTop: "1px solid var(--p-color-border, #e1e3e5)", paddingTop: 16 }}>
+                    <createFetcher.Form method="post">
+                      <input type="hidden" name="intent" value="sync_prices" />
+                      <s-stack direction="block" gap="small">
+                        <s-text color="subdued">
+                          {changed.length > 0
+                            ? "Al aplicar, los precios se recalculan contra Bsale en ese momento y se escriben en Shopify. Los productos en oferta se seguirán omitiendo."
+                            : "No hay cambios que aplicar: Shopify ya coincide con Bsale. El botón se habilita cuando una revisión encuentre diferencias."}
+                        </s-text>
+                        <s-button
+                          type="submit"
+                          variant="primary"
+                          {...(changed.length === 0 ? { disabled: true } : {})}
+                          {...(isRunning || createFetcher.state !== "idle" ? { loading: true } : {})}
+                        >
+                          {changed.length > 0
+                            ? `Aplicar ${changed.length} ${changed.length === 1 ? "cambio" : "cambios"} en Shopify`
+                            : "Aplicar cambios en Shopify"}
+                        </s-button>
+                      </s-stack>
+                    </createFetcher.Form>
+                  </div>
+                </s-stack>
+              </s-section>
+            );
+          })()}
+
+          {/* Último sync de precios aplicado */}
+          {tab === "precios" && lastPriceSync && (() => {
+            // Los payloads anteriores a la protección de descuentos no traen el
+            // campo: mostrar 0 haría creer que se revisó y no había ninguno.
+            const hasDiscountData = lastPriceSync.mode !== undefined;
+            const discountedCount = (lastPriceSync.discounted_skipped ?? []).length;
+            const ageMs = lastPriceSyncAt ? Date.now() - new Date(lastPriceSyncAt).getTime() : 0;
+            const isStale = ageMs > 24 * 60 * 60 * 1000;
+
+            const collapsed = isStale && !showOldPriceReport;
+
+            return (
+            <s-section heading="Historial: último cambio aplicado en Shopify">
+              <div style={{ marginBottom: collapsed ? 0 : 16 }}>
+                <s-stack direction="block" gap="small">
+                  <s-text color="subdued">
+                    La última vez que SkuBeam <strong>escribió</strong> precios en Shopify fue el {formatDate(lastPriceSyncAt)}.
+                    Esto es historial: no dice nada de los precios de hoy.
+                  </s-text>
+                  <s-button variant="tertiary" onClick={() => setShowOldPriceReport((v) => !v)}>
+                    {showOldPriceReport ? "Ocultar ese reporte ▲" : "Ver ese reporte ▼"}
+                  </s-button>
+                </s-stack>
+              </div>
+
+              {collapsed ? null : (
+              <>
               {/* Stats row */}
               <s-grid gridTemplateColumns="repeat(auto-fit, minmax(140px, 1fr))" gap="base">
                 {(
                   [
                     { label: "SKUs publicados",     value: lastPriceSync.total_bsale_codes, tone: undefined },
                     { label: "Matcheados con Bsale", value: lastPriceSync.shopify_matched,  tone: "success" as const },
+                    { label: "En oferta (omitidos)", value: hasDiscountData ? discountedCount : "—", tone: discountedCount > 0 ? "warning" as const : undefined },
                     { label: "No en Bsale",         value: lastPriceSync.skipped,           tone: lastPriceSync.skipped > 0 ? "warning" as const : undefined },
                     { label: "Sync Shopify",        value: lastPriceSync.shopify_updated ?? 0, tone: (lastPriceSync.shopify_updated ?? 0) > 0 ? "success" as const : undefined },
                     { label: "Con error",           value: lastPriceSync.errors,            tone: lastPriceSync.errors > 0 ? "critical" as const : undefined },
                     { label: "Error en Shopify",    value: (lastPriceSync.shopify_push_errors ?? []).length, tone: (lastPriceSync.shopify_push_errors ?? []).length > 0 ? "critical" as const : undefined },
-                  ] as Array<{ label: string; value: number; tone?: "success" | "warning" | "critical" }>
-                ).map(({ label, value, tone }) => (
-                  <s-box key={label} padding="base" borderWidth="small" borderRadius="base" background="base">
-                    <s-stack direction="block" gap="small">
-                      <s-text color="subdued">{label}</s-text>
-                      {tone
-                        ? <s-badge tone={tone}>{value.toLocaleString("es-CL")}</s-badge>
-                        : <p style={{ margin: 0, fontWeight: 600, fontSize: "var(--p-font-size-500, 1.25rem)" }}>{value.toLocaleString("es-CL")}</p>
-                      }
-                    </s-stack>
-                  </s-box>
-                ))}
+                  ] as Array<{ label: string; value: number | string; tone?: "success" | "warning" | "critical" }>
+                ).map(({ label, value, tone }) => {
+                  const shown = typeof value === "number" ? value.toLocaleString("es-CL") : value;
+                  return (
+                    <s-box key={label} padding="base" borderWidth="small" borderRadius="base" background="base">
+                      <s-stack direction="block" gap="small">
+                        <s-text color="subdued">{label}</s-text>
+                        {tone
+                          ? <s-badge tone={tone}>{shown}</s-badge>
+                          : <p style={{ margin: 0, fontWeight: 600, fontSize: "var(--p-font-size-500, 1.25rem)" }}>{shown}</p>
+                        }
+                      </s-stack>
+                    </s-box>
+                  );
+                })}
               </s-grid>
 
               <div style={{ marginTop: 16, marginBottom: 16 }}>
-                <s-text color="subdued">Ejecutado: {formatDate(lastPriceSyncAt)}</s-text>
+                <s-banner tone={isStale ? "warning" : "info"}>
+                  <s-paragraph>
+                    Esta es una <strong>foto del {formatDate(lastPriceSyncAt)}</strong>: la columna
+                    &quot;Precio Shopify&quot; es el precio que tenía Shopify ese día, no el actual.
+                    {!hasDiscountData && " Además es anterior a la protección de descuentos, así que pudo haber pisado precios de oferta."}
+                  </s-paragraph>
+                </s-banner>
               </div>
 
               {/* Buscar un SKU específico en el resultado del último sync */}
@@ -1519,6 +2229,14 @@ export default function BsaleIntegrationPage() {
                 ) : (
                   <s-banner tone="info" heading={`"${priceSearch}" no aparece en el detalle de este sync.`} />
                 );
+              })()}
+
+              {/* Productos en oferta — precio deliberadamente no modificado */}
+              {(() => {
+                const discountFiltered = (lastPriceSync.discounted_skipped ?? []).filter(
+                  (i) => !priceSearch.trim() || i.sku_code.toLowerCase().includes(priceSearch.trim().toLowerCase()),
+                );
+                return discountFiltered.length > 0 && <DiscountSkippedTable items={discountFiltered} />;
               })()}
 
               {/* SKUs no encontrados en Bsale */}
@@ -1569,10 +2287,14 @@ export default function BsaleIntegrationPage() {
                   </s-stack>
                 </s-box>
               )}
+              </>
+              )}
             </s-section>
-          )}
+            );
+          })()}
 
           {/* Boleta electrónica */}
+          {tab === "documentos" && (
           <s-section heading="Nota de Venta automática">
             {hasAddon ? (
               <s-stack direction="block" gap="base">
@@ -1653,85 +2375,6 @@ export default function BsaleIntegrationPage() {
                     )}
                   </s-stack>
                 </s-box>
-                {recentBoletas.length === 0 ? (
-                  <s-text color="subdued">Aún no hay Notas de Venta emitidas.</s-text>
-                ) : (
-                  <div
-                    style={{
-                      border:       "1px solid var(--p-color-border, #e1e3e5)",
-                      borderRadius: "var(--p-border-radius-200, 8px)",
-                      overflow:     "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        display:             "grid",
-                        gridTemplateColumns: "1fr 100px 90px 60px",
-                        padding:             "8px 12px",
-                        background:          "var(--p-color-bg-surface-secondary, #f6f6f7)",
-                        borderBottom:        "1px solid var(--p-color-border, #e1e3e5)",
-                        fontSize:            "var(--p-font-size-300, 0.75rem)",
-                        fontWeight:          600,
-                        color:               "var(--p-color-text-subdued, #6d7175)",
-                        textTransform:       "uppercase",
-                        letterSpacing:       "0.04em",
-                      }}
-                    >
-                      <span>Orden Shopify</span>
-                      <span>Total</span>
-                      <span>Estado</span>
-                      <span>PDF</span>
-                    </div>
-                    {recentBoletas.map((doc, idx) => (
-                      <div
-                        key={doc.shopify_order_id}
-                        style={{
-                          display:             "grid",
-                          gridTemplateColumns: "1fr 100px 90px 60px",
-                          padding:             "10px 12px",
-                          alignItems:          "center",
-                          background:          idx % 2 === 0
-                            ? "var(--p-color-bg-surface, #fff)"
-                            : "var(--p-color-bg-surface-secondary, #f6f6f7)",
-                          borderBottom: idx < recentBoletas.length - 1
-                            ? "1px solid var(--p-color-border-subdued, #e1e3e5)"
-                            : "none",
-                          fontSize: "var(--p-font-size-350, 0.875rem)",
-                        }}
-                      >
-                        <span style={{ fontWeight: 600 }}>#{doc.shopify_order_id}</span>
-                        <span>
-                          {doc.total_amount != null
-                            ? new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP" }).format(Number(doc.total_amount))
-                            : "—"}
-                        </span>
-                        <span>
-                          <s-badge
-                            tone={
-                              doc.status === "emitted" ? "success"
-                              : doc.status === "error"  ? "critical"
-                              : "warning"
-                            }
-                          >
-                            {doc.status === "emitted" ? "Emitida"
-                              : doc.status === "error" ? "Error"
-                              : "Pendiente"}
-                          </s-badge>
-                        </span>
-                        <span>
-                          {doc.url_pdf ? (
-                            <a href={doc.url_pdf} target="_blank" rel="noreferrer"
-                              style={{ color: "var(--p-color-text-emphasis, #005bd3)" }}>
-                              Ver
-                            </a>
-                          ) : (
-                            <span style={{ color: "var(--p-color-text-subdued, #6d7175)" }}>—</span>
-                          )}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </s-stack>
             ) : (
               <s-box padding="large" borderWidth="small" borderRadius="base" background="base">
@@ -1757,7 +2400,14 @@ export default function BsaleIntegrationPage() {
                 </s-stack>
               </s-box>
             )}
+
+            {/* El historial sigue accesible aunque el add-on se desactive: los PDF
+                ya emitidos se siguen necesitando. */}
+            {(hasAddon || initialDocuments.total > 0) && (
+              <BsaleDocumentsTable initial={initialDocuments} />
+            )}
           </s-section>
+          )}
         </>
       )}
 

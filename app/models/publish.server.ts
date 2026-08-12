@@ -43,6 +43,11 @@ export type PublishResult =
  * (imported from WooCommerce migration, created manually, or just inserted from a
  * live Bsale search). Shared by the per-row "Publicar" button and the Bsale
  * search-and-publish flow so both go through the exact same Shopify calls.
+ *
+ * El producto se crea SIEMPRE como borrador (DRAFT). Bsale solo aporta código,
+ * nombre, precio y código de barras — no hay imágenes ni descripción, así que
+ * publicarlo activo lo dejaría visible en la tienda como una ficha vacía. El
+ * merchant lo pasa a activo desde Shopify cuando termine de completarlo.
  */
 export async function publishSkuToShopify(
   admin:       AdminClient,
@@ -80,7 +85,7 @@ export async function publishSkuToShopify(
     variables: {
       product: {
         title:  sku.title || sku.sku_code,
-        status: "ACTIVE",
+        status: "DRAFT",
         ...(sku.vendor ? { vendor: sku.vendor } : {}),
       },
     },
@@ -128,12 +133,10 @@ export async function publishSkuToShopify(
   const inventoryItemNumericId = parseInt(inventoryItemGid.split("/").pop()!, 10);
   const locationNumericId      = parseInt(locationGid.split("/").pop()!, 10);
 
-  // ── Step 4: publish to online store via REST ──────────────────────────────
-  await fetch(`https://${shopId}/admin/api/2026-04/products/${productNumericId}.json`, {
-    method:  "PUT",
-    headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
-    body:    JSON.stringify({ product: { id: Number(productNumericId), published: true } }),
-  });
+  // ── Step 4: (sin publicar en el canal online) ──────────────────────────────
+  // Antes se hacía PUT { published: true } acá. Se eliminó a propósito: el producto
+  // queda en borrador y es el merchant quien lo activa en Shopify una vez que le
+  // agregó imágenes y descripción.
 
   // ── Step 5: set stock if we have an inventory level ───────────────────────
   const { data: invLevel } = await supabaseAdmin

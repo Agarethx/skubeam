@@ -37,6 +37,7 @@ export type Database = {
       bsale_documents: {
         Row: {
           bsale_document_id: number | null
+          bsale_document_number: number | null
           created_at: string | null
           document_type: string
           error_message: string | null
@@ -49,6 +50,7 @@ export type Database = {
         }
         Insert: {
           bsale_document_id?: number | null
+          bsale_document_number?: number | null
           created_at?: string | null
           document_type?: string
           error_message?: string | null
@@ -61,6 +63,7 @@ export type Database = {
         }
         Update: {
           bsale_document_id?: number | null
+          bsale_document_number?: number | null
           created_at?: string | null
           document_type?: string
           error_message?: string | null

@@ -36,12 +36,12 @@
     "all": "All SKUs",
     "unpublished": "Unpublished",
     "publish": "Publish",
-    "published": "✓ Published",
+    "published": "✓ Draft created",
     "publishAll": "Publish all",
     "publishSelected": "Publish selected",
     "exportCsv": "Export CSV",
     "noSkus": "No SKUs registered",
-    "unpublishedBanner": "Search Bsale by SKU or name and publish straight to Shopify — no full catalog import, just what you look up."
+    "unpublishedBanner": "Search Bsale by SKU or name and publish straight to Shopify — no full catalog import, just what you look up. Products are created as drafts (inactive): add images and description in Shopify, then activate them when ready."
   },
   "forecast": {
     "title": "Forecast & Replenishment",

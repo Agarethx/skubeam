@@ -63,7 +63,18 @@ export interface PriceSyncErrorDetail {
   error:    string;
 }
 
+/** A variant on sale in Shopify (price < compareAtPrice) — never overwritten. */
+export interface PriceSyncDiscountSkip {
+  sku_code:         string;
+  title:            string | null;
+  price_shopify:    number;  // precio de oferta vigente
+  compare_at_price: number;  // precio tachado
+  price_bsale:      number;  // lo que el sync habría escrito
+}
+
 export interface PriceSyncResult {
+  /** "preview" = nada se escribió, solo se calculó el diff. "apply" = se pusheó a Shopify. */
+  mode:                "preview" | "apply";
   total_bsale_codes:   number;
   shopify_matched:     number;
   skipped:             number;
@@ -73,6 +84,7 @@ export interface PriceSyncResult {
   error_details:       PriceSyncErrorDetail[];
   skipped_items:       Array<{ sku_code: string; title: string | null }>;
   items:               PriceSyncItemDetail[];
+  discounted_skipped:  PriceSyncDiscountSkip[];
   shopify_push_errors: PriceSyncErrorDetail[];
   synced_at:           string;
 }
@@ -84,17 +96,33 @@ export interface PriceSyncResult {
  * save locally, push to Shopify) but for price instead of quantity. Never touches
  * SKUs that aren't in Shopify yet — those go through the on-demand search + publish
  * flow instead of a bulk import.
+ *
+ * CONTRATO: esta función solo escribe PRECIO. Nunca toca inventario en Shopify ni
+ * `inventory_levels` en Supabase — de eso se encarga exclusivamente
+ * syncBsaleStockToSkuBeam. Los dos jobs son disjuntos a propósito.
+ *
+ * Descuentos: una variante en oferta en Shopify (`compareAtPrice` > `price`) NO se
+ * toca. Escribir el precio de lista de Bsale encima la sacaría de oferta y dejaría
+ * un tachado incoherente, así que se reporta en `discounted_skipped` y el merchant
+ * decide. Los descuentos automáticos y códigos de descuento de Shopify no usan
+ * `variant.price`, así que esos SKUs se sincronizan normalmente.
+ *
+ * `opts.preview` calcula el diff completo sin escribir nada (ni Supabase ni Shopify).
  */
 export async function syncBsalePricesToShopify(
   shopId:      string,
   token:       string,
   priceListId: number,
+  opts:        { preview?: boolean; onProgress?: (records: number) => void } = {},
 ): Promise<PriceSyncResult> {
+  const preview  = opts.preview === true;
+  const progress = opts.onProgress ?? (() => {});
+  const mode: "preview" | "apply" = preview ? "preview" : "apply";
   const now = new Date().toISOString();
   const empty: PriceSyncResult = {
-    total_bsale_codes: 0, shopify_matched: 0, skipped: 0, synced: 0,
+    mode, total_bsale_codes: 0, shopify_matched: 0, skipped: 0, synced: 0,
     shopify_updated: 0, errors: 0, error_details: [], skipped_items: [],
-    items: [], shopify_push_errors: [], synced_at: now,
+    items: [], discounted_skipped: [], shopify_push_errors: [], synced_at: now,
   };
 
   // 1. Published, non-archived SKUs — paginated past Supabase's 1000-row cap.
@@ -121,27 +149,49 @@ export async function syncBsalePricesToShopify(
   }
   if (shopifySkus.length === 0) return empty;
 
-  // 2. Bsale price list — paginated, build variantId + sku_code indexes.
+  // 2. Bsale price list — paginado en lotes de 5 páginas concurrentes (mismo patrón
+  //    que el sync de stock). Secuencial, un catálogo de miles de variantes tardaba
+  //    minutos, y ahora esta lectura está en el camino crítico de cada vista previa.
   const byVariantId = new Map<number, number>(); // variantId → price
-  const byCode       = new Map<string, { price: number; variantId: number }>();
-  let offset = 0;
-  const limit = 50;
-  for (;;) {
+  const byCode      = new Map<string, { price: number; variantId: number }>();
+  const LIMIT       = 50;
+  const PARALLEL    = 5;
+  const t2          = Date.now();
+
+  const getPricePage = async (off: number): Promise<BsalePriceDetail[]> => {
     const data = await get<BsalePage<BsalePriceDetail>>(
-      `/price_lists/${priceListId}/details.json?expand=[variant]&limit=${limit}&offset=${offset}`,
+      `/price_lists/${priceListId}/details.json?expand=[variant]&limit=${LIMIT}&offset=${off}`,
       token,
     );
-    const items = data?.items ?? [];
-    if (items.length === 0) break;
-    for (const item of items) {
-      const v = item.variant;
-      if (!v?.id || item.variantValueWithTaxes <= 0) continue;
-      byVariantId.set(v.id, item.variantValueWithTaxes);
-      if (v.code?.trim()) byCode.set(v.code.trim().toUpperCase(), { price: item.variantValueWithTaxes, variantId: v.id });
+    return data?.items ?? [];
+  };
+
+  let offset = 0;
+  const MAX_RECORDS = 500_000; // tope de seguridad ante una API que nunca devuelve página vacía
+  outer: while (offset < MAX_RECORDS) {
+    const offsets = Array.from({ length: PARALLEL }, (_, i) => offset + i * LIMIT);
+    const pages   = await Promise.all(offsets.map(getPricePage));
+
+    for (const items of pages) {
+      if (items.length === 0) break outer;
+      for (const item of items) {
+        const v = item.variant;
+        if (!v?.id || item.variantValueWithTaxes <= 0) continue;
+        byVariantId.set(v.id, item.variantValueWithTaxes);
+        if (v.code?.trim()) byCode.set(v.code.trim().toUpperCase(), { price: item.variantValueWithTaxes, variantId: v.id });
+      }
+      offset += items.length;
+      if (items.length < LIMIT) break outer;
     }
-    if (items.length < limit) break;
-    offset += limit;
+
+    // Señal de vida: esta es la fase larga (una lista de precios grande son cientos
+    // de páginas). Sin esto la UI solo muestra un spinner mudo y no hay forma de
+    // distinguir "va lento" de "el job murió".
+    progress(offset);
   }
+
+  console.log(`[bsale-prices] lista ${priceListId}: ${byVariantId.size} variantes con precio (${offset} registros leídos)  elapsed=${((Date.now() - t2) / 1000).toFixed(1)}s`);
+  progress(offset);
 
   // 3. Match — prefer the stored bsale_variant_id, fall back to matching by SKU code.
   const matched: Array<{
@@ -181,6 +231,8 @@ export async function syncBsalePricesToShopify(
     }
   }
 
+  // Re-linking bsale_variant_id is a mapping repair, not a price change — it runs in
+  // preview too so the "Aplicar" pass doesn't have to rediscover the same matches.
   for (const u of toSaveVariantId) {
     await supabaseAdmin.from("skus").update({ bsale_variant_id: u.bsale_variant_id }).eq("id", u.id);
   }
@@ -189,20 +241,10 @@ export async function syncBsalePricesToShopify(
     return { ...empty, total_bsale_codes: shopifySkus.length, skipped: skippedItems.length, skipped_items: skippedItems };
   }
 
-  // 4. Save sale_price in Supabase.
-  let synced = 0;
-  let errors = 0;
-  const errorDetails: PriceSyncErrorDetail[] = [];
-  for (const m of matched) {
-    const { error } = await supabaseAdmin.from("skus").update({ sale_price: m.bsalePrice }).eq("id", m.skuId);
-    if (error) { errors++; errorDetails.push({ sku_code: m.skuCode, title: m.title, error: error.message }); }
-    else synced++;
-  }
-  await refreshSkuAnalytics();
-
-  // 5. Fetch current Shopify prices (so the report can show before → after).
+  // 4. Fetch current Shopify price + compareAtPrice. This runs BEFORE any write:
+  //    a variant on sale must be classified before we decide to touch it at all.
   const admin = await getShopifyGraphQLClient(shopId);
-  const beforeMap = new Map<number, number>(); // shopifyVariantId → current price
+  const beforeMap = new Map<number, { price: number; compareAt: number | null }>();
   const NODES_BATCH = 250;
 
   const variantGids = matched.map((m) => `gid://shopify/ProductVariant/${m.shopifyVariantId}`);
@@ -211,19 +253,63 @@ export async function syncBsalePricesToShopify(
     const res = await admin.graphql(
       `#graphql
       query GetVariantPrices($ids: [ID!]!) {
-        nodes(ids: $ids) { ... on ProductVariant { id price } }
+        nodes(ids: $ids) { ... on ProductVariant { id price compareAtPrice } }
       }`,
       { variables: { ids: batch } },
     );
-    const json = await res.json() as { data?: { nodes?: Array<{ id: string; price: string } | null> } };
+    const json = await res.json() as {
+      data?: { nodes?: Array<{ id: string; price: string; compareAtPrice: string | null } | null> };
+    };
     for (const node of json.data?.nodes ?? []) {
       if (!node) continue;
       const varId = parseInt(node.id.split("/").pop()!, 10);
-      beforeMap.set(varId, parseFloat(node.price));
+      beforeMap.set(varId, {
+        price:     parseFloat(node.price),
+        compareAt: node.compareAtPrice != null ? parseFloat(node.compareAtPrice) : null,
+      });
     }
   }
 
-  // 6. Push updated prices — grouped by product, since productVariantsBulkUpdate takes
+  // 5. Split off variants currently on sale — those are never overwritten.
+  //    A stale compareAtPrice at or below the price is not a discount, so those
+  //    keep syncing normally.
+  const EPS = 0.005;
+  const eligible: typeof matched = [];
+  const discountedSkipped: PriceSyncDiscountSkip[] = [];
+
+  for (const m of matched) {
+    const before = beforeMap.get(m.shopifyVariantId);
+    if (before && before.compareAt != null && before.compareAt > before.price + EPS) {
+      discountedSkipped.push({
+        sku_code:         m.skuCode,
+        title:            m.title,
+        price_shopify:    before.price,
+        compare_at_price: before.compareAt,
+        price_bsale:      m.bsalePrice,
+      });
+      continue;
+    }
+    eligible.push(m);
+  }
+
+  discountedSkipped.sort((a, b) => a.sku_code.localeCompare(b.sku_code));
+
+  // 6. Save sale_price in Supabase — only for SKUs whose price we're actually
+  //    syncing, so `skus.sale_price` keeps reflecting what's live in Shopify.
+  let synced = 0;
+  let errors = 0;
+  const errorDetails: PriceSyncErrorDetail[] = [];
+
+  if (!preview) {
+    for (const m of eligible) {
+      const { error } = await supabaseAdmin.from("skus").update({ sale_price: m.bsalePrice }).eq("id", m.skuId);
+      if (error) { errors++; errorDetails.push({ sku_code: m.skuCode, title: m.title, error: error.message }); }
+      else synced++;
+    }
+    await refreshSkuAnalytics();
+  }
+
+  // 7. Push updated prices — grouped by product, since productVariantsBulkUpdate takes
   //    one productId per call. Skip variants already at the right price.
   const VARIANT_UPDATE_MUTATION = `#graphql
     mutation UpdatePrices($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
@@ -233,9 +319,9 @@ export async function syncBsalePricesToShopify(
     }`;
 
   const byProduct = new Map<number, typeof matched>();
-  for (const m of matched) {
-    const before = beforeMap.get(m.shopifyVariantId);
-    if (before !== undefined && Math.abs(before - m.bsalePrice) < 0.005) continue;
+  for (const m of eligible) {
+    const before = beforeMap.get(m.shopifyVariantId)?.price;
+    if (before !== undefined && Math.abs(before - m.bsalePrice) < EPS) continue;
     const arr = byProduct.get(m.shopifyProductId) ?? [];
     arr.push(m);
     byProduct.set(m.shopifyProductId, arr);
@@ -244,39 +330,41 @@ export async function syncBsalePricesToShopify(
   let shopifyUpdated = 0;
   const shopifyPushErrors: PriceSyncErrorDetail[] = [];
 
-  for (const [productId, entries] of byProduct.entries()) {
-    const variantsInput = entries.map((e) => ({
-      id:    `gid://shopify/ProductVariant/${e.shopifyVariantId}`,
-      price: e.bsalePrice.toFixed(2),
-    }));
-    try {
-      const res = await admin.graphql(VARIANT_UPDATE_MUTATION, {
-        variables: { productId: `gid://shopify/Product/${productId}`, variants: variantsInput },
-      });
-      const json = await res.json() as {
-        data?: { productVariantsBulkUpdate?: { userErrors: Array<{ field: string; message: string }> } };
-      };
-      const userErrors = json.data?.productVariantsBulkUpdate?.userErrors ?? [];
-      if (userErrors.length === 0) {
-        shopifyUpdated += entries.length;
-      } else {
-        const msg = userErrors.map((e) => e.message).join("; ");
+  if (!preview) {
+    for (const [productId, entries] of byProduct.entries()) {
+      const variantsInput = entries.map((e) => ({
+        id:    `gid://shopify/ProductVariant/${e.shopifyVariantId}`,
+        price: e.bsalePrice.toFixed(2),
+      }));
+      try {
+        const res = await admin.graphql(VARIANT_UPDATE_MUTATION, {
+          variables: { productId: `gid://shopify/Product/${productId}`, variants: variantsInput },
+        });
+        const json = await res.json() as {
+          data?: { productVariantsBulkUpdate?: { userErrors: Array<{ field: string; message: string }> } };
+        };
+        const userErrors = json.data?.productVariantsBulkUpdate?.userErrors ?? [];
+        if (userErrors.length === 0) {
+          shopifyUpdated += entries.length;
+        } else {
+          const msg = userErrors.map((e) => e.message).join("; ");
+          for (const e of entries) shopifyPushErrors.push({ sku_code: e.skuCode, title: e.title, error: msg });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         for (const e of entries) shopifyPushErrors.push({ sku_code: e.skuCode, title: e.title, error: msg });
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      for (const e of entries) shopifyPushErrors.push({ sku_code: e.skuCode, title: e.title, error: msg });
     }
   }
 
-  // 7. Build per-SKU comparison for the report.
-  const items: PriceSyncItemDetail[] = matched
+  // 8. Build per-SKU comparison for the report (only the SKUs we'd actually touch).
+  const items: PriceSyncItemDetail[] = eligible
     .map((m) => {
-      const before = beforeMap.get(m.shopifyVariantId) ?? null;
+      const before = beforeMap.get(m.shopifyVariantId)?.price ?? null;
       return {
         sku_code: m.skuCode, title: m.title,
         price_before: before, price_after: m.bsalePrice,
-        changed: before === null || Math.abs(before - m.bsalePrice) >= 0.005,
+        changed: before === null || Math.abs(before - m.bsalePrice) >= EPS,
       };
     })
     .sort((a, b) => {
@@ -284,7 +372,14 @@ export async function syncBsalePricesToShopify(
       return a.sku_code.localeCompare(b.sku_code);
     });
 
+  console.log(
+    `[bsale-prices] ${mode}  shop=${shopId}  matched=${matched.length}  elegibles=${eligible.length}` +
+    `  en_oferta_omitidos=${discountedSkipped.length}  a_cambiar=${items.filter((i) => i.changed).length}` +
+    `  pusheados=${shopifyUpdated}`,
+  );
+
   return {
+    mode,
     total_bsale_codes: shopifySkus.length,
     shopify_matched:   matched.length,
     skipped:           skippedItems.length,
@@ -294,6 +389,7 @@ export async function syncBsalePricesToShopify(
     error_details:       errorDetails,
     skipped_items:       skippedItems,
     items,
+    discounted_skipped:  discountedSkipped,
     shopify_push_errors: shopifyPushErrors,
     synced_at: now,
   };

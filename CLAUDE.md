@@ -314,6 +314,26 @@ export interface StockChangeEvent {
 - **pushPurchaseOrder**: `POST /v1/purchaseOrder.json` ✅
 - **onStockChange**: webhook entrante de Bsale → `POST /webhooks/bsale/stock` ✅
 
+### 🔒 Contrato stock ↔ precios (Bsale → Shopify)
+
+**Stock y precio son jobs disjuntos. Nunca mezclarlos.**
+
+| Job | Escribe | Nunca toca |
+|---|---|---|
+| `bsale_stock` (`stocks.server.ts`) | `inventory_levels` + `inventoryAdjustQuantities` | precio, `sale_price`, `compareAtPrice` |
+| `bsale_prices` (`products.server.ts`) | `skus.sale_price` + `productVariantsBulkUpdate` (solo `price`) | inventario en Shopify ni `inventory_levels` |
+| webhook `document:add` (`realtime.server.ts`) | `inventoryAdjustQuantities` + `sales_history` | precio |
+
+El único lugar donde un flujo Bsale escribe precio fuera del job de precios es la **creación** de un producto nuevo (`publish.server.ts`, `api.worker.tsx` → `handleBulkPublish`): ahí el precio de Bsale es el precio inicial y después nunca se re-sincroniza solo.
+
+**Publicar desde Bsale = crear borrador.** Los productos creados desde el tab "Sin publicar" (`/app/skus?tab=unpublished`) se crean en Shopify con `status: DRAFT` y **no** se publican en el canal online. Bsale solo aporta SKU, nombre, precio, código de barras y stock — sin imágenes ni descripción, un producto activo aparecería en la tienda como ficha vacía. El merchant lo activa desde Shopify cuando lo completa. Fijado en `app/models/publish.server.test.ts`.
+
+`app/integrations/bsale/sync-contract.test.ts` es un guard estático sobre el fuente que falla si alguien vuelve a mezclar ambas responsabilidades.
+
+**Descuentos**: el sync de precios omite toda variante en oferta en Shopify (`compareAtPrice > price`) — escribir el precio de lista de Bsale encima cancelaría la promoción. Se reportan en `PriceSyncResult.discounted_skipped`. Los descuentos automáticos y códigos de descuento de Shopify no usan `variant.price`, así que esos SKUs se sincronizan normalmente.
+
+**Vista previa obligatoria**: el botón "Revisar cambios de precio" crea un job `bsale_prices_preview` que calcula el diff completo sin escribir nada (ni Supabase ni Shopify). El job `bsale_prices` (aplicar) solo se dispara desde el botón de confirmación de esa tarjeta, y recalcula contra Bsale en ese momento.
+
 ### ✅ Sync bidireccional en tiempo real — COMPLETADO
 
 #### Flujo 1 — Shopify → Bsale (descuento de stock por venta)

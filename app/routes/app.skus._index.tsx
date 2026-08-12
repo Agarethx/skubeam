@@ -249,7 +249,11 @@ function BsaleSearchPanel({ onPublished }: { onPublished: () => void }) {
           Buscar en Bsale
         </p>
         <s-text color="subdued">
-          Busca por código SKU exacto o por nombre de producto (parcial). No importa todo el catálogo — solo trae lo que buscas, para publicarlo en Shopify al instante.
+          Busca por código SKU exacto o por nombre de producto (parcial). No importa todo el catálogo — solo trae lo que buscas, para crearlo en Shopify al instante.
+        </s-text>
+        <s-text color="subdued">
+          El producto se crea como <strong>borrador (inactivo)</strong> con SKU, nombre, precio, código de barras y stock.
+          Como Bsale no aporta imágenes ni descripción, no queda visible en la tienda: complétalo en Shopify y actívalo tú.
         </s-text>
 
         <div style={{ maxWidth: "400px" }}>
@@ -321,7 +325,7 @@ function BsaleSearchPanel({ onPublished }: { onPublished: () => void }) {
                     </span>
                     <span>
                       {isDone ? (
-                        <s-badge tone="success">Publicado ✓</s-badge>
+                        <s-badge tone="success">Borrador creado ✓</s-badge>
                       ) : err ? (
                         <s-badge tone="critical">{err}</s-badge>
                       ) : (
